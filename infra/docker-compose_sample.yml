@@ -1,0 +1,96 @@
+services:
+  # ----------------------------
+  # Nginx reverse proxy
+  # ----------------------------
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    networks:
+      - web
+    restart: unless-stopped
+  
+  # ----------------------------
+  # TextRoute app
+  # ----------------------------
+  textroute:
+    build:
+      context: ./textroute
+      dockerfile: Dockerfile
+    command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "6060", "--reload"]
+    environment:
+      DATABASE_URL: "postgresql://postgres:mypassword()@postgres:5432/postgres"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6060:6060"
+      - "5678:5678"
+    networks:
+      - web
+      - internal
+  
+  # ----------------------------
+  # MkDocs documentation
+  # ----------------------------
+  mkdocs:
+    image: mayname/mkdocs:latest
+    build: ./mkdocs
+    ports:
+      - "8000:8000"
+    networks:
+      - web
+    restart: unless-stopped
+  
+  # ----------------------------
+  # SMS simulator (frontend dev build)
+  # ----------------------------
+  sms-simulator:
+    build:
+      context: ./sms-simulator
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    environment:
+      VITE_API_BASE_URL: http://localhost:6060
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    networks:
+      - web
+  
+  # ----------------------------
+  # PostgreSQL database
+  # ----------------------------
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "mypassword"
+      POSTGRES_DB: postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - web          # <-- ADD THIS
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+# ----------------------------
+# Volumes and Networks
+# ----------------------------
+volumes:
+  postgres_data:
+
+networks:
+  web:
+  internal:
+    internal: true

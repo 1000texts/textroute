@@ -1,0 +1,19 @@
+site_name: TextRoute Documentation
+site_description: User guide, philosophy, and about my app
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    # - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Flow: flow.md
+  - User Guide: user-guide.md
+  - Philosophy: philosophy.md
+  - About: about.md
+  - Concent: concent.md
+  - Flow Swimlane: flow_swimlane.md
+  - Memory: memory.md

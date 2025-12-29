@@ -1,0 +1,39 @@
+{
+	"info": {
+		"_postman_id": "e09aff0f-b3bf-4659-8a3b-53207afbd96e",
+		"name": "Rest API Client",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "26622147"
+	},
+	"item": [
+		{
+			"name": "127.0.0.1:8000/webhook/inbound\"",
+			"request": {
+				"auth": {
+					"type": "noauth"
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "    {\n        \"from\": \"+15551234567\",\n        \"to\": \"+15559876543\",\n        \"body\": \"Hello from Twilio!\"\n    }"
+				},
+				"url": {
+					"raw": "127.0.0.1:8000/webhook/inbound\"",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8000",
+					"path": [
+						"webhook",
+						"inbound\""
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}

@@ -1,0 +1,10 @@
+server {
+    listen 80;
+    server_name sms-simulator.1000texts.com;
+
+    location / {
+        proxy_pass http://sms-simulator:6060;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
