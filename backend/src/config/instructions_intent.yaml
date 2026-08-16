@@ -1,0 +1,3 @@
+instructions:
+  intent1: "Based on the following input, classify the request into one of these categories: "
+  intent2: " DO NOT come up with a cateogry of your own. Return a JSON object with a single key 'intent'."

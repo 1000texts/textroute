@@ -236,5 +236,7 @@ __marimo__/
 # Docker
 docker-compose.yml
 
-
-
+# Infrastructure
+infra/postgres/data/
+infra/nginx/certs/
+infra/nginx/conf.d/

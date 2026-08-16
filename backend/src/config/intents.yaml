@@ -1,0 +1,21 @@
+canonical_intents:
+  request_service:
+    schema: ServiceRequest
+  request_borrow:
+    schema: BorrowRequest
+  offer_service:
+    schema: OfferService
+  status_update:
+    schema: StatusUpdate
+  announcement:
+    schema: AnnouncementRequest
+  warning:
+    schema: Warning
+  complaint:
+    schema: Complaint
+  feedback:
+    schema: Feedback
+  poll:
+    schema: Poll
+  general:
+    schema: GeneralRequest

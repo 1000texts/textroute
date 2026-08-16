@@ -5,7 +5,7 @@ Example:
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg17
     container_name: postgres
     environment:
       POSTGRES_USER: postgres

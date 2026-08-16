@@ -1,6 +1,7 @@
 services:
   # ----------------------------
   # Nginx reverse proxy
+  # Docker network
   # ----------------------------
   nginx:
     image: nginx:alpine
@@ -8,85 +9,107 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro
     networks:
       - web
     restart: unless-stopped
-  
+
   # ----------------------------
-  # TextRoute app
+  # TextRoute FastAPI application
+  # --reload + debugpy
+  # TextRoute: 6060 exposed
+  # debugpy: 5678 exposed
   # ----------------------------
   textroute:
     build:
-      context: ./textroute
+      context: ./backend
       dockerfile: Dockerfile
-    command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "6060", "--reload"]
+    command:
+      [
+        "python",
+        "-m",
+        "debugpy",
+        "--listen",
+        "0.0.0.0:5678",
+        "-m",
+        "uvicorn",
+        "src.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "6060",
+        "--reload"
+      ]
     environment:
-      DATABASE_URL: "postgresql://postgres:mypassword()@postgres:5432/postgres"
+      DATABASE_URL: "postgresql://postgres:mypassword%28%29@postgres:5432/postgres"
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "6060:6060"
       - "5678:5678"
+    volumes:
+      - ./backend:/app
     networks:
       - web
       - internal
-  
+    restart: unless-stopped
+
   # ----------------------------
   # MkDocs documentation
+  # 8000 exposed
+  # URL: optional/local
   # ----------------------------
   mkdocs:
-    image: mayname/mkdocs:latest
-    build: ./mkdocs
+    build:
+      context: ./docs/mkdocs
     ports:
       - "8000:8000"
     networks:
       - web
     restart: unless-stopped
-  
+
   # ----------------------------
-  # SMS simulator (frontend dev build)
+  # SMS simulator
+  # Development/testing only
   # ----------------------------
   sms-simulator:
     build:
-      context: ./sms-simulator
+      context: ./tools/sms-simulator
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:6060}
     environment:
       VITE_API_BASE_URL: http://localhost:6060
-    restart: unless-stopped
     ports:
       - "5173:5173"
     networks:
       - web
-  
+    restart: unless-stopped
+
   # ----------------------------
-  # PostgreSQL database
+  # PostgreSQL + pgvector
+  # 5432 exposed for local tools
   # ----------------------------
   postgres:
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "mypassword"
+      POSTGRES_PASSWORD: "mypassword%28%29"
       POSTGRES_DB: postgres
-    restart: unless-stopped
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - web          # <-- ADD THIS
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-# ----------------------------
-# Volumes and Networks
-# ----------------------------
 volumes:
   postgres_data:
 

@@ -1,0 +1,27 @@
+aliases:
+  service: request_service
+  help: request_service
+  support: request_service
+  repair: request_service
+  maintenance: request_service
+
+  borrow: request_borrow
+
+  offer: offer_service
+  sales: offer_service
+
+  update: status_update
+  check in: status_update
+
+  notification: announcement
+  news: announcement
+
+  alert: warning
+
+  complaint: complaint
+  review: feedback
+  suggestion: feedback
+
+  survey: poll
+  request: general
+  information: general
