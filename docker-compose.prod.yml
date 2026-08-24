@@ -23,7 +23,7 @@ services:
   # ----------------------------
   textroute:
     build:
-      context: ./backend
+      context: ./textroute-api
       dockerfile: Dockerfile
     command:
       [
@@ -35,8 +35,8 @@ services:
         "6060"
       ]
     environment:
-      DATABASE_URL: "postgresql://postgres:mypassword%28%29@postgres:5432/postgres"
-      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      DATABASE_URL: ${DATABASE_URL}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,15 +63,15 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "mypassword%28%29"
-      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 5

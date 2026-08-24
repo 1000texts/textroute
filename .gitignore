@@ -13,6 +13,8 @@ venv*
 
 # Environment files
 .env
+.env.prod
+!.env.example
 !.env_sample
 
 # OS files

@@ -9,7 +9,7 @@ services:
     container_name: postgres
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: change-me
       POSTGRES_DB: postgres
     ports:
       - "5432:5432"

@@ -1,0 +1,3 @@
+instructions:
+  intro: "Classify the user message into one of these canonical intents:"
+  constraint: "Use only a listed canonical intent. Do not invent a new category."

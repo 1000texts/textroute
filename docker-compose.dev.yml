@@ -22,7 +22,7 @@ services:
   # ----------------------------
   textroute:
     build:
-      context: ./backend
+      context: ./textroute-api
       dockerfile: Dockerfile
     command:
       [
@@ -41,8 +41,10 @@ services:
         "--reload"
       ]
     environment:
-      DATABASE_URL: "postgresql://postgres:mypassword%28%29@postgres:5432/postgres"
-      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      DATABASE_URL: ${DATABASE_URL}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      LLM_MODEL_PATH: ${LLM_MODEL_PATH}
+      LLM_EMBEDDING_MODEL_GGUF: ${LLM_EMBEDDING_MODEL_GGUF}
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,7 +52,8 @@ services:
       - "6060:6060"
       - "5678:5678"
     volumes:
-      - ./backend:/app
+      - ./textroute-api:/app
+      - ${LLM_MODELS_HOST_PATH}:/app/models
     networks:
       - web
       - internal
@@ -80,7 +83,7 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:6060}
     environment:
-      VITE_API_BASE_URL: http://localhost:6060
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:6060}
     ports:
       - "5173:5173"
     networks:
@@ -94,9 +97,9 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "mypassword%28%29"
-      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
@@ -104,7 +107,7 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -116,4 +119,3 @@ volumes:
 networks:
   web:
   internal:
-    internal: true

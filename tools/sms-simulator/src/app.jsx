@@ -2,6 +2,11 @@ import { useState } from 'react'
 import axios from 'axios'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
 
+function initialsFromNumber(value) {
+    const digits = String(value).replace(/\D/g, '')
+    if (digits.length >= 2) return digits.slice(-2)
+    return '•'
+}
 
 export default function App() {
     const [from, setFrom] = useState('+15551234567')
@@ -68,28 +73,134 @@ export default function App() {
     }
 
     return (
-        <div className="container">
-            <div className="header">
-                Sender: <input value={from} onChange={e => setFrom(e.target.value)} />
-                Receiver: <input value={to} onChange={e => setTo(e.target.value)} />
-            </div>
+        <div className="page">
+            <div className="phone">
+                <div className="phone-screen">
+                    <div className="dynamic-island" aria-hidden="true" />
 
-            <div className="chat">
-                {messages.map((m, i) => (
-                    <div key={i} className={`bubble ${m.side}`}>{m.text}</div>
-                ))}
-            </div>
+                    <header className="status-bar" aria-hidden="true">
+                        <span className="status-time">9:41</span>
+                        <span className="status-icons">
+                            <svg className="icon-signal" viewBox="0 0 18 12" fill="currentColor">
+                                <rect x="0" y="7" width="3" height="5" rx="0.6" />
+                                <rect x="5" y="5" width="3" height="7" rx="0.6" />
+                                <rect x="10" y="2.5" width="3" height="9.5" rx="0.6" />
+                                <rect x="15" y="0" width="3" height="12" rx="0.6" opacity="0.35" />
+                            </svg>
+                            <svg className="icon-wifi" viewBox="0 0 16 12" fill="currentColor">
+                                <path d="M8 9.4a1.35 1.35 0 1 0 0 2.7 1.35 1.35 0 0 0 0-2.7Zm0-3.3c1.2 0 2.3.46 3.15 1.22l-1.1 1.12A2.9 2.9 0 0 0 8 7.6c-.75 0-1.44.28-1.96.74L4.94 7.22A4.35 4.35 0 0 1 8 6.1Zm0-3.15c2.05 0 3.92.78 5.35 2.06L12.2 6.15A5.7 5.7 0 0 0 8 4.55c-1.55 0-2.97.58-4.06 1.54L2.8 4.95A7.85 7.85 0 0 1 8 2.95Z" />
+                            </svg>
+                            <span className="battery">
+                                <span className="battery-body">
+                                    <span className="battery-level" />
+                                </span>
+                                <span className="battery-nub" />
+                            </span>
+                        </span>
+                    </header>
 
-            <div className="input">
-                <textarea
-                    value={body}
-                    onChange={e => setBody(e.target.value)}
-                    placeholder="Type your message..."
-                    onKeyDown={handleKeyDown} // handle Enter key
-                />
-                <button onClick={sendMessage} disabled={loading}>
-                    {loading ? '...                     ' : 'Send'} {/* simple 3-dot indicator */}
-                </button>
+                    <div className="nav-bar">
+                        <span className="nav-back" aria-hidden="true">
+                            <svg viewBox="0 0 12 20" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M10 2 2 10l8 8" />
+                            </svg>
+                        </span>
+                        <div className="nav-contact">
+                            <div className="avatar" aria-hidden="true">{initialsFromNumber(to)}</div>
+                            <label className="contact-name">
+                                <span className="sr-only">Receiver</span>
+                                <input
+                                    value={to}
+                                    onChange={e => setTo(e.target.value)}
+                                    aria-label="Receiver"
+                                />
+                            </label>
+                            <label className="contact-from">
+                                <span>From</span>
+                                <input
+                                    value={from}
+                                    onChange={e => setFrom(e.target.value)}
+                                    aria-label="Sender"
+                                />
+                            </label>
+                        </div>
+                        <span className="nav-info" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <circle cx="12" cy="12" r="10" opacity="0.15" />
+                                <path d="M12 10.5a1.2 1.2 0 0 1 1.2 1.2v5.1a1.2 1.2 0 1 1-2.4 0v-5.1a1.2 1.2 0 0 1 1.2-1.2Zm0-4.3a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9Z" />
+                            </svg>
+                        </span>
+                    </div>
+
+                    <div className="container">
+                        <div className="chat">
+                            {messages.length === 0 && (
+                                <div className="empty-state">
+                                    <div className="empty-avatar" aria-hidden="true">{initialsFromNumber(to)}</div>
+                                    <p className="empty-name">{to}</p>
+                                    <p className="empty-caption">Text Message · iPhone</p>
+                                </div>
+                            )}
+                            {messages.map((m, i) => {
+                                const prev = messages[i - 1]
+                                const next = messages[i + 1]
+                                const isFirst = !prev || prev.side !== m.side
+                                const isLast = !next || next.side !== m.side
+                                const isTyping = m.side === 'left' && m.text === '...'
+                                return (
+                                    <div
+                                        key={i}
+                                        className={`row ${m.side} ${isFirst ? 'first' : ''} ${isLast ? 'last' : ''}`}
+                                    >
+                                        <div className={`bubble ${m.side} ${isLast ? 'tailed' : ''} ${isTyping ? 'typing' : ''}`}>
+                                            {isTyping ? (
+                                                <span className="typing-dots" aria-hidden="true">
+                                                    <span />
+                                                    <span />
+                                                    <span />
+                                                </span>
+                                            ) : (
+                                                m.text
+                                            )}
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                        </div>
+
+                        <div className="input">
+                            <span className="composer-plus" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <path d="M12 8v8M8 12h8" />
+                                </svg>
+                            </span>
+                            <textarea
+                                value={body}
+                                onChange={e => setBody(e.target.value)}
+                                placeholder="Text Message"
+                                onKeyDown={handleKeyDown}
+                                rows={1}
+                            />
+                            <button
+                                className={body.trim() ? 'armed' : ''}
+                                onClick={sendMessage}
+                                disabled={loading}
+                                aria-label="Send"
+                            >
+                                {loading ? (
+                                    <span className="send-spinner" />
+                                ) : (
+                                    <svg viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 4.5c.4 0 .75.16 1.02.43l6.05 6.05a1.1 1.1 0 1 1-1.56 1.56L13.1 8.13V18.4a1.1 1.1 0 1 1-2.2 0V8.13L6.49 12.54a1.1 1.1 0 1 1-1.56-1.56l6.05-6.05A1.45 1.45 0 0 1 12 4.5Z" />
+                                    </svg>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="home-indicator" aria-hidden="true" />
+                </div>
             </div>
         </div>
     )
