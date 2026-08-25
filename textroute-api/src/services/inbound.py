@@ -1,12 +1,7 @@
 from src.ai.extraction import analyze_request_payload
 from src.db.db import exec_db
 from src.db.models import InboundMessage
-from src.services.onboarding import (
-    capture_info,
-    get_consent,
-    get_moderator_apporval,
-    get_or_create_member_id,
-)
+from src.services.onboarding import get_or_create_member_id
 from src.services.requests import save_request
 
 
@@ -27,21 +22,7 @@ def handle_inbound_message(db, sender, receiver, body):
 
     # Init steps:
     # get or create member_id
-    member_id, is_need_info, is_need_consent, is_need_approval = (
-        get_or_create_member_id(db, sender, receiver)
-    )
-
-    # capture info
-    if is_need_info:
-        capture_info(member_id)
-
-    # ask for consent,
-    if is_need_consent:
-        get_consent(member_id)
-
-    # moderator apporval,
-    if is_need_approval:
-        get_moderator_apporval(member_id)
+    member_id = get_or_create_member_id(db, sender)
 
     # open/continue conversation,
     conversation_history = retrieve_conversation(member_id)  # pyright: ignore[reportUndefinedVariable]

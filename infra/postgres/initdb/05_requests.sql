@@ -1,6 +1,6 @@
 CREATE TABLE public.requests (
     id BIGSERIAL PRIMARY KEY,
-    requester_id UUID NULL REFERENCES public.members(member_id) NOT NULL,    -- Who made the request
+    requester_id UUID NULL REFERENCES public.members(id),    -- Who made the request
     request_text TEXT NOT NULL, -- Raw user input (never lose this)
     request_type TEXT NOT NULL, -- Intent classifier output 'ServiceRequest', 'ItemBorrowRequest', etc.
     extracted_filters JSONB NOT NULL, -- Structured extraction (schema varies by request_type)

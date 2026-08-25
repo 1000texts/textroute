@@ -1,0 +1,13 @@
+# class MessageRouter:
+
+#     # def route_inbound(...):
+#     #     ...
+
+#     # def propose_recipients(...):
+#     #     ...
+
+#     # def apply_moderator_decision(...):
+#     #     ...
+
+#     # def deliver(...):
+#     #     ...

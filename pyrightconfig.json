@@ -1,0 +1,5 @@
+{
+  "venvPath": "textroute-api",
+  "venv": ".venv",
+  "extraPaths": ["textroute-api"]
+}

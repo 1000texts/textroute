@@ -9,8 +9,8 @@ router = APIRouter(prefix="/webhook", tags=["webhooks"])
 
 
 @router.post("/inbound")
-async def inbound_webhook(request: Request, db: Session = Depends(get_db)):
-    payload = InboundWebhookRequest.model_validate(await request.json())
+def inbound_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = InboundWebhookRequest.model_validate(request.json())
     return handle_inbound_message(
         db,
         sender=payload.sender,

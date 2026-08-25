@@ -1,0 +1,109 @@
+:root {
+  --bg: #111111;
+  --fg: #f5f5f5;
+  --muted: #c8c8c8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "IBM Plex Mono", "Courier New", Courier, monospace;
+  letter-spacing: 0.02em;
+}
+
+.frame {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 1.5rem 4rem;
+}
+
+.brand {
+  margin: 0;
+  font-size: 2.4rem;
+  font-weight: 400;
+}
+
+.page-title {
+  margin: 2.4rem 0 2.8rem;
+  font-size: 1.35rem;
+  font-weight: 400;
+}
+
+.form {
+  width: min(520px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 1.35rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.95rem;
+}
+
+.field input {
+  width: 100%;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--fg);
+  padding: 0.7rem 0.85rem;
+  font: inherit;
+  outline: none;
+}
+
+.field input::placeholder {
+  color: #8a8a8a;
+}
+
+.field input:focus {
+  box-shadow: 0 0 0 1px var(--fg);
+}
+
+.submit {
+  margin: 1.6rem auto 0;
+  background: none;
+  border: 0;
+  color: var(--fg);
+  font: inherit;
+  font-size: 1.05rem;
+  cursor: pointer;
+  padding: 0.4rem 0.6rem;
+}
+
+.submit:hover:not(:disabled),
+.submit:focus-visible {
+  text-decoration: underline;
+}
+
+.submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.message {
+  margin: 1.5rem 0 0;
+  max-width: 520px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.message.error {
+  color: #ffb4b4;
+}

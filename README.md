@@ -16,7 +16,7 @@ AI infers intent and context; a human moderator still decides who receives the m
 │   ├── src/schemas/        # Pydantic models
 │   ├── src/db/             # SQLAlchemy
 │   ├── src/config/         # YAML + env
-│   └── src/workers/        # offline jobs (faction graph, later)
+│   └── src/workers/        # offline jobs
 ├── docs/mkdocs/            # documentation site
 ├── infra/                  # nginx, postgres, scripts
 ├── tools/sms-simulator/    # local SMS UI (dev only)

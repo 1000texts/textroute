@@ -1,41 +1,29 @@
-from src.config.config import Config  # Sessions and ORM base
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
-from src.db.models import Member
+from src.models.member import Member
 from uuid import UUID
 
 
 def get_or_create_member_id(
-    # If (sender, receiver) does not exist → INSERT → UUID generated
-    # If it does exist → conflict → UPDATE does nothing
-    # RETURNING member_id works in both cases
     db: Session,
-    sender: str,
-    receiver: str,
+    phone_number: str,
 ) -> UUID:
     stmt = (
         insert(Member)
-        .values(sender=sender, receiver=receiver)
+        .values(phone_number=phone_number)
         .on_conflict_do_update(
-            constraint="members_unique_1",  # sender + receiver
+            constraint="members_phone_number_unique",
             set_={
-                # no-op update, required for RETURNING
-                "sender": Member.sender
+                "phone_number": Member.phone_number,
             },
         )
-        .returning(
-            Member.member_id,
-            Member.is_need_info,
-            Member.is_need_consent,
-            Member.is_need_approval,
-        )
+        .returning(Member.id)
     )
 
-    row = db.execute(stmt).one()
-    return row.member_id, row.is_need_info, row.is_need_consent, row.is_need_approval
+    return db.execute(stmt).scalar_one()
 
-def add(member):
 
+def add(db: Session, member: Member) -> Member:
     db.add(member)
     db.commit()
     db.refresh(member)

@@ -1,63 +1,123 @@
--- public.members definition
--- Drop table
--- DROP TABLE public.members;
-CREATE TABLE
-	public.members (
-		"name" varchar NULL,
-		member_id uuid DEFAULT gen_random_uuid () NULL,
-		sender varchar(50) NULL,
-		receiver varchar(50) NULL,
-		CONSTRAINT members_unique UNIQUE (member_id),
-		CONSTRAINT members_unique_1 UNIQUE (sender, receiver)
-	);
+CREATE TABLE public.members (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
 
---1. member_items
---Items that a member owns or can lend/share.
+    phone_number varchar(16) NOT NULL,
+    name varchar(100) NULL,
+
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT members_phone_number_unique
+        UNIQUE (phone_number)
+);
+
+
+
+CREATE TABLE public.member_profiles (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    membership_id uuid NOT NULL
+        REFERENCES public.group_memberships(id),
+
+    display_name varchar(100) NULL,
+    bio text NULL,
+
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT member_profiles_membership_unique
+        UNIQUE (membership_id)
+);
+
+
+
 CREATE TABLE public.member_items (
-    item_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-    member_id uuid NOT NULL REFERENCES public.members(member_id),
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    membership_id uuid NOT NULL
+        REFERENCES public.group_memberships(id),
+
     name varchar(255) NOT NULL,
     description text NULL,
     item_type varchar(50) NULL,
-    created_at timestamp DEFAULT now()
+
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 
---2. member_availability
---Tracks when members are available for events, calls, etc.
+
+
+CREATE TABLE public.member_skills (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    membership_id uuid NOT NULL
+        REFERENCES public.group_memberships(id),
+
+    skill_name varchar(100) NOT NULL,
+    proficiency varchar(50) NULL,
+    description text NULL,
+
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+
+CREATE TABLE public.member_interests (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    membership_id uuid NOT NULL
+        REFERENCES public.group_memberships(id),
+
+    interest_name varchar(100) NOT NULL,
+
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+
 CREATE TABLE public.member_availability (
-    availability_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-    member_id uuid NOT NULL REFERENCES public.members(member_id),
-    day_of_week varchar(10) NOT NULL, -- e.g., 'Monday', 'Tuesday'
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    membership_id uuid NOT NULL
+        REFERENCES public.group_memberships(id),
+
+    day_of_week smallint NOT NULL,
+
     start_time time NOT NULL,
     end_time time NOT NULL,
-    timezone varchar(50) NULL
+
+    timezone varchar(50) NULL,
+
+    CONSTRAINT member_availability_day_check
+        CHECK (day_of_week BETWEEN 0 AND 6)
 );
 
---3. member_talents
---Stores skills, talents, or specializations of a member.
-create table public.member_talents (
-    talent_id uuid default gen_random_uuid() primary key,
-    member_id uuid not null references public.members(member_id),
-    talent_name varchar(100) not null,
-    proficiency varchar(50) null,
--- e.g., Beginner, Intermediate, Expert
-description text null
+CREATE TABLE public.membership_consents (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    membership_id uuid NOT NULL
+        REFERENCES public.group_memberships(id),
+
+    consent_type varchar(50) NOT NULL,
+
+    status varchar(20) NOT NULL DEFAULT 'pending',
+
+    consent_version int NOT NULL DEFAULT 1,
+
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    responded_at timestamptz NULL,
+
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT membership_consents_status_check
+        CHECK (status IN ('pending', 'granted', 'revoked')),
+
+    CONSTRAINT membership_consents_version_check
+        CHECK (consent_version >= 1),
+
+    CONSTRAINT membership_consents_type_check
+        CHECK (consent_type IN (
+            'group_membership',
+            'receive_messages',
+            'profile_sharing'
+        ))
 );
 
---4. member_contacts
---Optional: store phone/email/social handles for a member.
-CREATE TABLE public.member_contacts (
-    contact_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-    member_id uuid NOT NULL REFERENCES public.members(member_id),
-    contact_type varchar(50) NOT NULL, -- e.g., email, phone, twitter
-    contact_value varchar(255) NOT NULL,
-    is_primary boolean DEFAULT false
-);
-
---5. member_groups
---Optional: if you want members to join groups or communities.
-CREATE TABLE public.member_groups (
-    group_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-    group_name varchar(100) NOT NULL,
-    description text NULL
-);
