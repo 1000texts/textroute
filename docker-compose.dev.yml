@@ -45,6 +45,8 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       LLM_MODEL_PATH: ${LLM_MODEL_PATH}
       LLM_EMBEDDING_MODEL_GGUF: ${LLM_EMBEDDING_MODEL_GGUF}
+      SMS_PROVIDER: ${SMS_PROVIDER:-logging}
+      SMS_PROVIDER_URL: ${SMS_PROVIDER_URL:-}
     depends_on:
       postgres:
         condition: service_healthy

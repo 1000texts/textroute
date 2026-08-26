@@ -20,6 +20,14 @@ class PhoneNumberManager:
             db.query(PhoneNumber).filter(PhoneNumber.phone_number == normalized).first()
         )
 
+    def list_for_group(self, db: Session, group_id: UUID) -> list[PhoneNumber]:
+        return (
+            db.query(PhoneNumber)
+            .filter(PhoneNumber.group_id == group_id)
+            .order_by(PhoneNumber.assigned_at.asc().nullslast())
+            .all()
+        )
+
     def assign_available_number(
         self,
         db: Session,

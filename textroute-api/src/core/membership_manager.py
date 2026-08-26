@@ -48,6 +48,36 @@ class MembershipManager:
             .first()
         )
 
+    def list_active_memberships(
+        self,
+        db: Session,
+        group_id: UUID,
+    ) -> list[GroupMembership]:
+        return (
+            db.query(GroupMembership)
+            .filter(
+                GroupMembership.group_id == group_id,
+                GroupMembership.status == "active",
+            )
+            .all()
+        )
+
+    def get_membership(
+        self,
+        db: Session,
+        *,
+        member_id: UUID,
+        group_id: UUID,
+    ) -> GroupMembership | None:
+        return (
+            db.query(GroupMembership)
+            .filter(
+                GroupMembership.member_id == member_id,
+                GroupMembership.group_id == group_id,
+            )
+            .first()
+        )
+
     def join_group(
         self,
         db: Session,

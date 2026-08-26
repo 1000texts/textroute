@@ -1,5 +1,7 @@
 """HTTP request/response DTOs for API routes."""
 
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -22,3 +24,13 @@ class CreateGroupRequest(BaseModel):
     name: str
     description: str | None = None
     moderator_phone_number: str
+
+
+class AddMemberRequest(BaseModel):
+    phone_number: str
+    name: str | None = None
+    role: str = "member"
+
+
+class ApproveMessageRequest(BaseModel):
+    recipient_ids: list[UUID]

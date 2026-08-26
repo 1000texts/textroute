@@ -46,10 +46,10 @@ api/routes  →  services  →  core (*_manager)  →  models / db
 |-------|----------------|
 | `api/routes` | HTTP only: parse request, map domain errors → status codes |
 | `services` | Orchestration; owns `db.commit()` / `db.rollback()` |
-| `core` | Persistence managers (`flush` only), phone normalize, `MessageProcessor` |
+| `core` | Persistence managers (`flush` only), phone normalize, `MessageProcessor`, `SmsProvider` |
 | `models` | SQLAlchemy ORM |
 | `schemas/api` | HTTP DTOs |
-| `schemas/intent` + `domain` + `ai` | Future intent / matching (wire through `MessageProcessor`) |
+| `schemas/intent` + `domain` + `ai` | Intent / matching (processor v1 is heuristic; LLM stack optional) |
 
 Rules of thumb:
 
