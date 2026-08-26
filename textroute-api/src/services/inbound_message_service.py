@@ -4,9 +4,14 @@ from sqlalchemy.orm import Session
 
 from src.core.membership_manager import MembershipManager
 from src.core.message_manager import MessageManager
-from src.core.message_processor import MessageProcessor, ProcessingResult
+from src.core.message_processor import (
+    MessageProcessor,
+    ProcessingResult,
+    member_context_from_orm,
+)
 from src.core.phone_normalize import normalize_phone_number
 from src.core.phone_number_manager import PhoneNumberManager
+from src.domain.message_status import MessageWorkflowStatus
 from src.models import Group, Member, Message, PhoneNumber
 from src.services.inbound_errors import (
     DuplicateInboundMessageError,
@@ -15,22 +20,21 @@ from src.services.inbound_errors import (
     UnknownReceivingNumberError,
     UnknownSenderError,
 )
-from src.services.messaging_service import MessagingService
 
 logger = logging.getLogger(__name__)
 
 
 class InboundMessageService:
-    """Coordinates inbound SMS: resolve numbers → persist → process.
+    """Coordinates inbound SMS: resolve → persist → classify → await moderator.
 
     Transaction boundary (intentional):
-    1. Resolve + create inbound Message, then ``db.commit()``.
+    1. Resolve + create inbound Message (``received``), then ``db.commit()``.
        The original SMS must survive later processor failures.
-    2. Process / optional outbound writes, then ``db.commit()`` again.
-       On processing failure: ``rollback`` of the *second* unit of work only;
-       the inbound Message from step 1 remains durable.
+    2. Process + store suggestions (``awaiting_moderator``), then commit again.
+       On processing failure: rollback of the *second* unit of work only, then
+       mark the inbound row ``processing_failed`` in a third short commit.
 
-    Managers only ``flush()``; this service owns ``commit`` / ``rollback``.
+    ``MessageProcessor`` only recommends. This service never fan-outs SMS.
     """
 
     def __init__(
@@ -39,15 +43,11 @@ class InboundMessageService:
         membership_manager: MembershipManager | None = None,
         message_manager: MessageManager | None = None,
         message_processor: MessageProcessor | None = None,
-        messaging_service: MessagingService | None = None,
     ):
         self.phone_number_manager = phone_number_manager or PhoneNumberManager()
         self.membership_manager = membership_manager or MembershipManager()
         self.message_manager = message_manager or MessageManager()
         self.message_processor = message_processor or MessageProcessor()
-        self.messaging_service = messaging_service or MessagingService(
-            self.message_manager
-        )
 
     def handle_incoming_message(
         self,
@@ -79,8 +79,15 @@ class InboundMessageService:
         member = self._resolve_sender(db, from_phone_number)
         self._require_active_membership(db, member, group)
 
-        # Managers flush only; service commits so the inbound row survives
-        # processor failure (see class docstring).
+        parent_message_id = None
+        recent_fanout = self.message_manager.find_recent_fanout_to_member(
+            db,
+            group_id=group.id,
+            member_id=member.id,
+        )
+        if recent_fanout is not None:
+            parent_message_id = recent_fanout.parent_message_id
+
         message = self.message_manager.create_inbound(
             db,
             group_id=group.id,
@@ -89,6 +96,8 @@ class InboundMessageService:
             to_phone_number=to_phone_number,
             body=body,
             provider_message_id=provider_message_id,
+            parent_message_id=parent_message_id,
+            workflow_status=MessageWorkflowStatus.RECEIVED.value,
         )
         db.commit()
         logger.info(
@@ -96,25 +105,55 @@ class InboundMessageService:
             extra={"message_id": str(message.id), "group_id": str(group.id)},
         )
 
+        # Vertical slice: persist replies without intelligent processing yet.
+        if parent_message_id is not None:
+            self.message_manager.set_workflow_status(
+                db,
+                message,
+                MessageWorkflowStatus.RECEIVED.value,
+                processing_notes="reply_persisted_unprocessed",
+            )
+            db.commit()
+            return {
+                "status": "ok",
+                "message_id": str(message.id),
+                "group_id": str(group.id),
+                "member_id": str(member.id),
+                "workflow_status": message.workflow_status,
+                "processing": "reply_persisted",
+                "parent_message_id": str(parent_message_id),
+            }
+
         try:
-            result = self._process_and_deliver(
+            result = self._process_for_moderation(
                 db,
                 message=message,
                 group=group,
                 member=member,
-                receiving_number=receiving_number,
             )
             db.commit()
         except Exception:
+            message_id = message.id
             db.rollback()
             logger.exception(
                 "inbound_message_processing_failed",
-                extra={"message_id": str(message.id)},
+                extra={"message_id": str(message_id)},
             )
+            # Fresh transaction: mark durable inbound as failed.
+            failed = self.message_manager.find_by_id(db, message_id)
+            if failed is not None:
+                self.message_manager.set_workflow_status(
+                    db,
+                    failed,
+                    MessageWorkflowStatus.PROCESSING_FAILED.value,
+                    processing_notes="processor_exception",
+                )
+                db.commit()
             return {
                 "status": "persisted",
-                "message_id": str(message.id),
+                "message_id": str(message_id),
                 "processing": "failed",
+                "workflow_status": MessageWorkflowStatus.PROCESSING_FAILED.value,
             }
 
         return {
@@ -122,8 +161,10 @@ class InboundMessageService:
             "message_id": str(message.id),
             "group_id": str(group.id),
             "member_id": str(member.id),
+            "workflow_status": message.workflow_status,
+            "intent": result.intent,
+            "suggested_recipient_count": len(result.suggested_recipient_ids),
             "processing": result.notes,
-            "response_sent": bool(result.response_body),
         }
 
     def _resolve_receiving_number(
@@ -194,33 +235,52 @@ class InboundMessageService:
             )
             raise SenderNotInGroupError("Sender is not an active member of this group.")
 
-    def _process_and_deliver(
+    def _process_for_moderation(
         self,
         db: Session,
         *,
         message: Message,
         group: Group,
         member: Member,
-        receiving_number: PhoneNumber,
     ) -> ProcessingResult:
+        self.message_manager.set_workflow_status(
+            db,
+            message,
+            MessageWorkflowStatus.PROCESSING.value,
+        )
         logger.info(
             "message_processing_started",
             extra={"message_id": str(message.id)},
         )
-        result = self.message_processor.process(db, message)
-        logger.info(
-            "message_processing_completed",
-            extra={"message_id": str(message.id)},
+
+        memberships = self.membership_manager.list_active_memberships(db, group.id)
+        candidates = [
+            member_context_from_orm(m.member, role=m.role)
+            for m in memberships
+            if m.member is not None
+        ]
+
+        result = self.message_processor.process(
+            message_body=message.body,
+            sender_id=member.id,
+            candidates=candidates,
         )
 
-        if result.response_body:
-            self.messaging_service.send_message(
-                db,
-                group=group,
-                to_member=member,
-                from_phone_number=receiving_number.phone_number,
-                body=result.response_body,
-            )
-            logger.info("outbound_message_sent")
-
+        self.message_manager.apply_processing_result(
+            db,
+            message,
+            intent=result.intent,
+            constraints=result.constraints or None,
+            confidence=result.confidence,
+            suggested_recipient_ids=result.suggested_recipient_ids,
+            notes=result.notes,
+            workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
+        )
+        logger.info(
+            "message_processing_completed",
+            extra={
+                "message_id": str(message.id),
+                "workflow_status": message.workflow_status,
+            },
+        )
         return result

@@ -11,6 +11,6 @@
 #   05_groups          — groups + group_memberships
 #   06_member_profiles — profiles / skills / consent (depends on memberships)
 #   07_phone_numbers   — TextRoute number pool
-#   08_messages        — inbound/outbound SMS audit log
+#   08_messages        — inbound/outbound SMS + workflow lifecycle
 #
 # Reset local schema: docker compose -f docker-compose.dev.yml down -v

@@ -27,7 +27,9 @@ export function CreateGroup() {
         description: description.trim() ? description.trim() : null,
         moderator_phone_number: phoneNumber.trim(),
       });
-      setStatus(`Created ${group.name} (${group.id})`);
+      setStatus(
+        `Created ${group.name} · line ${group.phone_number ?? "n/a"} · id ${group.id}`,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create group");
     } finally {
