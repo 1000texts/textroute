@@ -26,6 +26,7 @@ venv*
 __pycache__/
 *.py[codz]
 *$py.class
+*.tsbuildinfo
 
 # C extensions
 *.so
@@ -206,6 +207,10 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
+# Keep shared launch/settings tracked, but never put secrets in them — use `.env`.
+# Optional personal overrides:
+.vscode/*.local.json
+textroute-api/.vscode/*.local.json
 #  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
 #  and can be added to the global gitignore or merged into this file. However, if you prefer, 

@@ -1,5 +1,12 @@
+"""Inbound SMS use case: resolve context → durable persist → suggest → queue.
+
+Entry: ``POST /webhook/messages`` (and ``/webhook/inbound``). This path never
+sends SMS; delivery happens only after moderator approval.
+"""
+
 import logging
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.membership_manager import MembershipManager
@@ -63,6 +70,7 @@ class InboundMessageService:
         from_phone_number = normalize_phone_number(from_phone_number)
         to_phone_number = normalize_phone_number(to_phone_number)
 
+        # Idempotency: provider retries must not create duplicate rows.
         if provider_message_id:
             existing = self.message_manager.find_by_provider_message_id(
                 db, provider_message_id
@@ -79,6 +87,8 @@ class InboundMessageService:
         member = self._resolve_sender(db, from_phone_number)
         self._require_active_membership(db, member, group)
 
+        # Link replies to the originating inbound when this member was recently
+        # fan-out'd. Reply intelligence is deferred; we only persist + link.
         parent_message_id = None
         recent_fanout = self.message_manager.find_recent_fanout_to_member(
             db,
@@ -88,24 +98,42 @@ class InboundMessageService:
         if recent_fanout is not None:
             parent_message_id = recent_fanout.parent_message_id
 
-        message = self.message_manager.create_inbound(
-            db,
-            group_id=group.id,
-            member_id=member.id,
-            from_phone_number=from_phone_number,
-            to_phone_number=to_phone_number,
-            body=body,
-            provider_message_id=provider_message_id,
-            parent_message_id=parent_message_id,
-            workflow_status=MessageWorkflowStatus.RECEIVED.value,
-        )
+        try:
+            message = self.message_manager.create_inbound(
+                db,
+                group_id=group.id,
+                member_id=member.id,
+                from_phone_number=from_phone_number,
+                to_phone_number=to_phone_number,
+                body=body,
+                provider_message_id=provider_message_id,
+                parent_message_id=parent_message_id,
+                workflow_status=MessageWorkflowStatus.RECEIVED.value,
+            )
+        except IntegrityError:
+            # Pre-insert lookup is a fast path; UNIQUE is authoritative under races.
+            db.rollback()
+            existing = (
+                self.message_manager.find_by_provider_message_id(
+                    db, provider_message_id
+                )
+                if provider_message_id
+                else None
+            )
+            if existing is None:
+                raise
+            logger.info(
+                "inbound_message_duplicate_after_insert_race",
+                extra={"message_id": str(existing.id)},
+            )
+            raise DuplicateInboundMessageError(str(existing.id)) from None
         db.commit()
         logger.info(
             "inbound_message_created",
             extra={"message_id": str(message.id), "group_id": str(group.id)},
         )
 
-        # Vertical slice: persist replies without intelligent processing yet.
+        # Vertical slice: persist replies without classification yet.
         if parent_message_id is not None:
             self.message_manager.set_workflow_status(
                 db,
@@ -139,7 +167,7 @@ class InboundMessageService:
                 "inbound_message_processing_failed",
                 extra={"message_id": str(message_id)},
             )
-            # Fresh transaction: mark durable inbound as failed.
+            # Fresh transaction: mark durable inbound as failed without losing it.
             failed = self.message_manager.find_by_id(db, message_id)
             if failed is not None:
                 self.message_manager.set_workflow_status(
@@ -243,6 +271,7 @@ class InboundMessageService:
         group: Group,
         member: Member,
     ) -> ProcessingResult:
+        """Heuristic suggestions only — moderator still chooses recipients."""
         self.message_manager.set_workflow_status(
             db,
             message,

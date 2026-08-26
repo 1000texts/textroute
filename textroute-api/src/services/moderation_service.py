@@ -1,4 +1,8 @@
-"""Moderator review + fan-out delivery of the original inbound SMS body."""
+"""Moderator review + fan-out of the original inbound SMS body.
+
+Callers (routes) must pass ``group_id`` from the authenticated session.
+This service scopes every lookup to that group; it does not authenticate.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +39,13 @@ class InvalidRecipientsError(ModerationError):
 
 
 class ModerationService:
-    """Human-in-the-loop: review suggestions, approve/reject, fan out."""
+    """Human-in-the-loop: review suggestions, approve/reject, fan out.
+
+    Approve sends the *unchanged* inbound body to each chosen recipient.
+    Parent inbound ends ``delivered`` / ``partially_delivered`` /
+    ``delivery_failed``; each successful outbound copy is ``sent``.
+    Per-recipient carrier receipts (``MessageDelivery``) are a follow-up.
+    """
 
     def __init__(
         self,
@@ -52,6 +62,7 @@ class ModerationService:
         )
 
     def list_queue(self, db: Session, group_id: UUID) -> list[dict]:
+        """Messages in ``awaiting_moderator`` for one group."""
         messages = self.message_manager.list_by_workflow_status(
             db,
             group_id=group_id,
@@ -59,14 +70,26 @@ class ModerationService:
         )
         return [self._message_summary(db, m) for m in messages]
 
-    def get_message(self, db: Session, message_id: UUID) -> dict:
-        message = self.message_manager.find_by_id(db, message_id)
+    def get_message(
+        self,
+        db: Session,
+        message_id: UUID,
+        *,
+        group_id: UUID,
+    ) -> dict:
+        message = self._find_group_message(db, message_id, group_id)
         if message is None:
             raise MessageNotFoundError("Message not found.")
         return self._message_detail(db, message)
 
-    def reject(self, db: Session, message_id: UUID) -> dict:
-        message = self._require_awaiting(db, message_id)
+    def reject(
+        self,
+        db: Session,
+        message_id: UUID,
+        *,
+        group_id: UUID,
+    ) -> dict:
+        message = self._require_awaiting(db, message_id, group_id)
         self.message_manager.set_workflow_status(
             db,
             message,
@@ -81,9 +104,10 @@ class ModerationService:
         db: Session,
         message_id: UUID,
         *,
+        group_id: UUID,
         recipient_ids: list[UUID],
     ) -> dict:
-        message = self._require_awaiting(db, message_id)
+        message = self._require_awaiting(db, message_id, group_id)
         if not recipient_ids:
             raise InvalidRecipientsError("At least one recipient is required.")
 
@@ -97,6 +121,7 @@ class ModerationService:
             recipient_ids=unique_ids,
         )
 
+        # Commit approval before fan-out so a mid-send crash still shows intent.
         self.message_manager.apply_approval(
             db,
             message,
@@ -113,6 +138,7 @@ class ModerationService:
         message: Message,
         recipients: list[Member],
     ) -> dict:
+        """Best-effort fan-out; continues after individual ``SmsProviderError``s."""
         group = message.group
         if group is None:
             group = db.query(Group).filter(Group.id == message.group_id).one()
@@ -149,34 +175,23 @@ class ModerationService:
 
         if failures and not delivered_ids:
             status = MessageWorkflowStatus.DELIVERY_FAILED.value
+            notes = f"fanout_failed count={len(failures)}"
         elif failures:
-            status = MessageWorkflowStatus.DELIVERY_FAILED.value
-            notes = f"partial_fanout failures={len(failures)}"
+            status = MessageWorkflowStatus.PARTIALLY_DELIVERED.value
+            notes = (
+                f"fanout_partial sent={len(delivered_ids)} "
+                f"failed={len(failures)}"
+            )
         else:
             status = MessageWorkflowStatus.DELIVERED.value
             notes = f"fanout_count={len(delivered_ids)}"
 
-        if failures and delivered_ids:
-            self.message_manager.set_workflow_status(
-                db,
-                message,
-                status,
-                processing_notes=notes,
-            )
-        elif failures:
-            self.message_manager.set_workflow_status(
-                db,
-                message,
-                status,
-                processing_notes=f"fanout_failed count={len(failures)}",
-            )
-        else:
-            self.message_manager.set_workflow_status(
-                db,
-                message,
-                status,
-                processing_notes=notes,
-            )
+        self.message_manager.set_workflow_status(
+            db,
+            message,
+            status,
+            processing_notes=notes,
+        )
         db.commit()
 
         summary = self._message_summary(db, message)
@@ -184,8 +199,13 @@ class ModerationService:
         summary["delivery_failures"] = failures
         return summary
 
-    def _require_awaiting(self, db: Session, message_id: UUID) -> Message:
-        message = self.message_manager.find_by_id(db, message_id)
+    def _require_awaiting(
+        self,
+        db: Session,
+        message_id: UUID,
+        group_id: UUID,
+    ) -> Message:
+        message = self._find_group_message(db, message_id, group_id)
         if message is None:
             raise MessageNotFoundError("Message not found.")
         if message.workflow_status != MessageWorkflowStatus.AWAITING_MODERATOR.value:
@@ -193,6 +213,18 @@ class ModerationService:
                 f"Message is not awaiting moderator "
                 f"(status={message.workflow_status})."
             )
+        return message
+
+    def _find_group_message(
+        self,
+        db: Session,
+        message_id: UUID,
+        group_id: UUID,
+    ) -> Message | None:
+        """Cross-group ids look like not-found (no existence leak across groups)."""
+        message = self.message_manager.find_by_id(db, message_id)
+        if message is None or message.group_id != group_id:
+            return None
         return message
 
     def _load_active_recipients(
@@ -223,15 +255,26 @@ class ModerationService:
             raise ModerationError("Group has no assigned TextRoute number.")
         return assigned[0].phone_number
 
-    def _member_brief(self, db: Session, member_id: UUID | None) -> dict | None:
+    def _member_brief(
+        self,
+        db: Session,
+        member_id: UUID | None,
+        group_id: UUID,
+    ) -> dict | None:
         if member_id is None:
             return None
         member = db.query(Member).filter(Member.id == member_id).first()
         if member is None:
             return {"id": str(member_id)}
+        membership = self.membership_manager.get_membership(
+            db,
+            member_id=member.id,
+            group_id=group_id,
+        )
+        profile = membership.profile if membership is not None else None
         return {
             "id": str(member.id),
-            "name": member.name,
+            "name": profile.display_name if profile is not None else member.name,
             "phone_number": member.phone_number,
         }
 
@@ -240,13 +283,16 @@ class ModerationService:
         db: Session,
         ids: list[UUID] | None,
         *,
+        group_id: UUID,
         reasons: dict | None = None,
     ) -> list[dict]:
         if not ids:
             return []
         out: list[dict] = []
         for member_id in ids:
-            brief = self._member_brief(db, member_id) or {"id": str(member_id)}
+            brief = self._member_brief(db, member_id, group_id) or {
+                "id": str(member_id)
+            }
             if reasons and member_id in reasons:
                 brief["reason"] = reasons[member_id]
             elif reasons and str(member_id) in reasons:
@@ -266,12 +312,16 @@ class ModerationService:
             "intent": message.intent,
             "confidence": message.confidence,
             "constraints": message.constraints,
-            "sender": self._member_brief(db, message.member_id),
+            "sender": self._member_brief(db, message.member_id, message.group_id),
             "suggested_recipients": self._recipients_brief(
-                db, message.suggested_recipient_ids
+                db,
+                message.suggested_recipient_ids,
+                group_id=message.group_id,
             ),
             "approved_recipients": self._recipients_brief(
-                db, message.approved_recipient_ids
+                db,
+                message.approved_recipient_ids,
+                group_id=message.group_id,
             ),
             "parent_message_id": (
                 str(message.parent_message_id) if message.parent_message_id else None
@@ -288,7 +338,11 @@ class ModerationService:
         detail["eligible_recipients"] = [
             {
                 "id": str(m.member.id),
-                "name": m.member.name,
+                "name": (
+                    m.profile.display_name
+                    if m.profile is not None
+                    else m.member.name
+                ),
                 "phone_number": m.member.phone_number,
                 "role": m.role,
                 "suggested": (

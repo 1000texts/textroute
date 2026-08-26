@@ -16,12 +16,9 @@
                 "6060",
                 "--reload"
             ],
-            "envFile": "${workspaceFolder}/textroute-api/.env",
+            "envFile": "${workspaceFolder}/.env",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}/textroute-api",
-                "DATABASE_URL": "postgresql://postgres:2ndComing%28%29@localhost:5432/postgres",
-                "OLLAMA_BASE_URL": "http://localhost:11434",
-                "LLM_MODEL_PATH": "/Users/kenjikahara/.lmstudio/models"
+                "PYTHONPATH": "${workspaceFolder}/textroute-api"
             },
             "console": "integratedTerminal",
             "jinja": true

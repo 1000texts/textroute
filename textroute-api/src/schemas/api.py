@@ -1,5 +1,7 @@
 """HTTP request/response DTOs for API routes."""
 
+from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,11 +28,51 @@ class CreateGroupRequest(BaseModel):
     moderator_phone_number: str
 
 
-class AddMemberRequest(BaseModel):
-    phone_number: str
-    name: str | None = None
-    role: str = "member"
-
-
 class ApproveMessageRequest(BaseModel):
     recipient_ids: list[UUID]
+
+
+class RequestModeratorChallenge(BaseModel):
+    group_phone_number: str
+    moderator_phone_number: str
+
+
+class ModeratorChallengeResponse(BaseModel):
+    challenge_id: UUID
+    expires_at: datetime
+    development_code: str | None = None
+
+
+class VerifyModeratorChallenge(BaseModel):
+    challenge_id: UUID
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class ModeratorSessionResponse(BaseModel):
+    group_id: UUID
+    moderator_member_id: UUID
+    group_name: str
+    group_phone_number: str
+    expires_at: datetime
+
+
+class MemberInput(BaseModel):
+    phone_number: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=100)
+
+
+class AddMembersRequest(BaseModel):
+    members: list[MemberInput] = Field(min_length=1)
+    consent_confirmed: Literal[True]
+
+
+class AddedMemberResponse(BaseModel):
+    member_id: UUID
+    membership_id: UUID
+    phone_number: str
+    name: str
+
+
+class AddMembersResponse(BaseModel):
+    group_id: UUID
+    members: list[AddedMemberResponse]

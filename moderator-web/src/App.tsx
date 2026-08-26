@@ -1,32 +1,105 @@
-import { useState } from "react";
+import {
+  BrowserRouter,
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useNavigate,
+} from "react-router-dom";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { SessionProvider, useSession } from "./auth/SessionContext";
+import { AddMember } from "./pages/AddMember";
 import { CreateGroup } from "./pages/CreateGroup";
+import { Login } from "./pages/Login";
 import { ReviewQueue } from "./pages/ReviewQueue";
 import "./index.css";
 
-type Page = "create" | "review";
-
-export default function App() {
-  const [page, setPage] = useState<Page>("review");
+function AppRoutes() {
+  const navigate = useNavigate();
+  const { session, logout } = useSession();
 
   return (
     <>
       <nav className="top-nav">
-        <button
-          type="button"
-          className={page === "create" ? "nav-link active" : "nav-link"}
-          onClick={() => setPage("create")}
+        <NavLink
+          className={({ isActive }) =>
+            isActive ? "nav-link active" : "nav-link"
+          }
+          to="/"
         >
           Create group
-        </button>
-        <button
-          type="button"
-          className={page === "review" ? "nav-link active" : "nav-link"}
-          onClick={() => setPage("review")}
-        >
-          Review
-        </button>
+        </NavLink>
+        {session ? (
+          <>
+            <NavLink
+              className={({ isActive }) =>
+                isActive ? "nav-link active" : "nav-link"
+              }
+              to="/review"
+            >
+              Review
+            </NavLink>
+            <NavLink
+              className={({ isActive }) =>
+                isActive ? "nav-link active" : "nav-link"
+              }
+              to="/add-member"
+            >
+              Add members
+            </NavLink>
+            <button
+              type="button"
+              className="nav-link"
+              onClick={async () => {
+                await logout();
+                navigate("/login", { replace: true });
+              }}
+            >
+              Log out
+            </button>
+          </>
+        ) : (
+          <NavLink
+            className={({ isActive }) =>
+              isActive ? "nav-link active" : "nav-link"
+            }
+            to="/login"
+          >
+            Moderator login
+          </NavLink>
+        )}
       </nav>
-      {page === "create" ? <CreateGroup /> : <ReviewQueue />}
+      <Routes>
+        <Route path="/" element={<CreateGroup />} />
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/review"
+          element={
+            <ProtectedRoute>
+              <ReviewQueue />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/add-member"
+          element={
+            <ProtectedRoute>
+              <AddMember />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <SessionProvider>
+        <AppRoutes />
+      </SessionProvider>
+    </BrowserRouter>
   );
 }

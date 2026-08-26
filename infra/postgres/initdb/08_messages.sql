@@ -43,7 +43,9 @@ CREATE TABLE public.messages (
             'awaiting_moderator',
             'approved',
             'delivering',
+            'sent',
             'delivered',
+            'partially_delivered',
             'processing_failed',
             'moderator_rejected',
             'delivery_failed'

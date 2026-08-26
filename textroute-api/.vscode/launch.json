@@ -15,11 +15,9 @@
                 "--reload"
             ],
             "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/../.env",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-                "DATABASE_URL": "postgresql://postgres:2ndComing()@localhost:5432/postgres",
-                "LLM_MODEL_PATH": "/Users/kenjikahara/.lmstudio/models",
-                "LLM_EMBEDDING_MODEL_GGUF": "Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+                "PYTHONPATH": "${workspaceFolder}"
             },
             "console": "integratedTerminal"
         }

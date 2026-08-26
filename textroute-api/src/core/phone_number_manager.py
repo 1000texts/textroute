@@ -28,6 +28,20 @@ class PhoneNumberManager:
             .all()
         )
 
+    def find_assigned_by_group(
+        self,
+        db: Session,
+        group_id: UUID,
+    ) -> PhoneNumber | None:
+        return (
+            db.query(PhoneNumber)
+            .filter(
+                PhoneNumber.group_id == group_id,
+                PhoneNumber.status == "assigned",
+            )
+            .first()
+        )
+
     def assign_available_number(
         self,
         db: Session,

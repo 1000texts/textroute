@@ -1,4 +1,4 @@
-"""Domain errors for inbound SMS handling."""
+"""Domain errors for inbound SMS. Routes map these to HTTP status codes."""
 
 
 class InboundMessageError(Exception):

@@ -41,11 +41,15 @@ SMS webhook
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/groups` | Create group + assign TextRoute number |
-| `POST` | `/groups/{id}/members` | Add an active member |
-| `GET` | `/groups/{id}/members` | List active members |
+| `POST` | `/auth/challenge` | Request moderator confirmation code |
+| `POST` | `/auth/verify` | Verify code and create HttpOnly session |
+| `GET` | `/auth/session` | Read current moderator/group context |
+| `POST` | `/auth/logout` | Revoke moderator session |
+| `GET` | `/members` | List members in the authenticated group |
+| `POST` | `/members` | Add consented members to authenticated group |
 | `POST` | `/webhook/messages` | Inbound SMS (`from` / `to` / `body`) |
 | `POST` | `/webhook/inbound` | Alias of `/webhook/messages` |
-| `GET` | `/groups/{id}/moderation/queue` | Messages awaiting moderator |
+| `GET` | `/moderation/queue` | Authenticated group's review queue |
 | `GET` | `/messages/{id}` | Message detail + eligible recipients |
 | `POST` | `/messages/{id}/approve` | `{ "recipient_ids": [...] }` then fan-out |
 | `POST` | `/messages/{id}/reject` | Mark moderator_rejected |
@@ -53,9 +57,17 @@ SMS webhook
 
 ## Workflow statuses
 
+Inbound routing message:
+
 `received` → `processing` → `awaiting_moderator` → `approved` → `delivering` → `delivered`
 
+Partial fan-out success uses `partially_delivered`. Outbound copies use `sent`
+when the provider accepts the send (not carrier delivery confirmation).
+
 Failures: `processing_failed`, `moderator_rejected`, `delivery_failed`.
+
+Per-recipient delivery receipts (`MessageDelivery`) are a near-term follow-up;
+do not block the current moderator + SMS + fan-out slice on that model.
 
 ## Outbound SMS
 
@@ -76,4 +88,24 @@ uvicorn src.main:app --reload --port 6060
 
 Docker Compose (from repo root) is the preferred full stack. Schema lives in
 `infra/postgres/initdb/` — reset with `docker compose -f docker-compose.dev.yml down -v`
-after message-table changes. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+after message/auth-table changes. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## Development moderator login
+
+Set a random `AUTH_SECRET` (at least 32 characters). For local development,
+`SMS_PROVIDER=logging` prints the six-digit challenge through the provider.
+`AUTH_EXPOSE_DEVELOPMENT_CODE=true` may also include it in the challenge
+response. Production forces response exposure off and should configure the
+HTTP SMS provider.
+
+Codes and session tokens are never stored directly: PostgreSQL stores HMAC
+hashes, expirations, attempt counts, and revocation state. The browser receives
+the session token only as an HttpOnly cookie and sends it automatically.
+
+The auth and consent tables are init scripts. Existing local databases must be
+recreated after pulling this schema:
+
+```bash
+docker compose -f docker-compose.dev.yml down -v
+docker compose -f docker-compose.dev.yml up --build
+```

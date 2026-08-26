@@ -4,7 +4,12 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from src.core.phone_normalize import normalize_phone_number
-from src.models import GroupMembership, Member
+from src.models import (
+    GroupMembership,
+    Member,
+    MemberProfile,
+    MembershipConsent,
+)
 
 
 class MembershipManager:
@@ -95,7 +100,9 @@ class MembershipManager:
             .first()
         )
         if existing is not None:
-            existing.role = role
+            # A bulk member add must never demote an existing moderator.
+            if existing.role != "moderator" or role == "moderator":
+                existing.role = role
             existing.status = status
             if status == "active" and existing.joined_at is None:
                 existing.joined_at = datetime.now(timezone.utc)
@@ -115,3 +122,56 @@ class MembershipManager:
         db.flush()
 
         return group_membership
+
+    def upsert_profile(
+        self,
+        db: Session,
+        *,
+        membership_id: UUID,
+        display_name: str,
+    ) -> MemberProfile:
+        profile = (
+            db.query(MemberProfile)
+            .filter(MemberProfile.membership_id == membership_id)
+            .first()
+        )
+        if profile is None:
+            profile = MemberProfile(
+                membership_id=membership_id,
+                display_name=display_name,
+            )
+        else:
+            profile.display_name = display_name
+        db.add(profile)
+        db.flush()
+        return profile
+
+    def grant_consent(
+        self,
+        db: Session,
+        *,
+        membership_id: UUID,
+        consent_type: str,
+    ) -> MembershipConsent:
+        consent = (
+            db.query(MembershipConsent)
+            .filter(
+                MembershipConsent.membership_id == membership_id,
+                MembershipConsent.consent_type == consent_type,
+            )
+            .first()
+        )
+        now = datetime.now(timezone.utc)
+        if consent is None:
+            consent = MembershipConsent(
+                membership_id=membership_id,
+                consent_type=consent_type,
+                status="granted",
+                responded_at=now,
+            )
+        else:
+            consent.status = "granted"
+            consent.responded_at = now
+        db.add(consent)
+        db.flush()
+        return consent

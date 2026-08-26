@@ -99,8 +99,8 @@ class Message(Base):
         CheckConstraint(
             "workflow_status IN ("
             "'received', 'processing', 'awaiting_moderator', 'approved', "
-            "'delivering', 'delivered', 'processing_failed', "
-            "'moderator_rejected', 'delivery_failed')",
+            "'delivering', 'sent', 'delivered', 'partially_delivered', "
+            "'processing_failed', 'moderator_rejected', 'delivery_failed')",
             name="messages_workflow_status_check",
         ),
     )

@@ -18,7 +18,7 @@ AI infers intent and context; a human moderator still decides who receives the m
 │   ├── src/schemas/            # api DTOs + intent schemas
 │   ├── src/domain/ + src/ai/   # intent stack (wired via processor later)
 │   └── tests/
-├── moderator-web/              # Vite React create-group UI (local)
+├── moderator-web/              # Vite React moderator auth/review/member UI
 ├── tools/sms-simulator/        # local SMS webhook UI (dev)
 ├── docs/mkdocs/                # product documentation site
 ├── infra/

@@ -9,6 +9,7 @@ from src.models.member_profile import MemberProfile
 from src.models.member_skill import MemberSkill
 from src.models.membership_consent import MembershipConsent
 from src.models.message import Message
+from src.models.moderator_auth import ModeratorLoginChallenge, ModeratorSession
 from src.models.phone_number import PhoneNumber
 from src.models.requests import Requests
 
@@ -24,6 +25,8 @@ __all__ = [
     "MemberSkill",
     "MembershipConsent",
     "Message",
+    "ModeratorLoginChallenge",
+    "ModeratorSession",
     "PhoneNumber",
     "Requests",
 ]

@@ -23,6 +23,10 @@ class SmsProvider(Protocol):
         """Send an SMS. Returns the provider message id."""
 
 
+class SmsProviderError(Exception):
+    """Raised when the provider fails to send."""
+
+
 class LoggingSmsProvider:
     """Dev/test provider: log the send and return a synthetic id."""
 
@@ -69,16 +73,20 @@ class HttpSmsProvider:
         to_number: str,
         body: str,
     ) -> str:
-        response = httpx.post(
-            self.url,
-            json={
-                "from": from_number,
-                "to": to_number,
-                "body": body,
-            },
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
+        try:
+            response = httpx.post(
+                self.url,
+                json={
+                    "from": from_number,
+                    "to": to_number,
+                    "body": body,
+                },
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SmsProviderError(str(exc)) from exc
+
         provider_id = f"http_{uuid4().hex[:16]}"
         try:
             payload = response.json()
@@ -100,10 +108,6 @@ class HttpSmsProvider:
             },
         )
         return provider_id
-
-
-class SmsProviderError(Exception):
-    """Raised when the provider fails to send."""
 
 
 def get_sms_provider() -> SmsProvider:

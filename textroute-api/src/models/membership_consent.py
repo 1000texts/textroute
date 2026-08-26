@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -65,6 +66,11 @@ class MembershipConsent(Base):
     membership: Mapped["GroupMembership"] = relationship(back_populates="consents")
 
     __table_args__ = (
+        UniqueConstraint(
+            "membership_id",
+            "consent_type",
+            name="membership_consents_membership_type_unique",
+        ),
         CheckConstraint(
             "status IN ('pending', 'granted', 'revoked')",
             name="membership_consents_status_check",

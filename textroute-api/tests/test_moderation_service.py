@@ -12,6 +12,7 @@ from src.services.messaging_service import MessagingService
 from src.services.moderation_service import (
     InvalidModerationStateError,
     InvalidRecipientsError,
+    MessageNotFoundError,
     ModerationService,
 )
 
@@ -54,16 +55,38 @@ def test_messaging_service_persists_after_provider_send():
         message_mgr.create_outbound.call_args.kwargs["body"]
         == "Does anyone have a ladder?"
     )
+    assert (
+        message_mgr.create_outbound.call_args.kwargs["workflow_status"]
+        == MessageWorkflowStatus.SENT.value
+    )
 
 
 def test_messaging_service_provider_failure_does_not_persist():
     db = MagicMock()
     message_mgr = MagicMock()
     provider = MagicMock()
-    provider.send_sms.side_effect = RuntimeError("twilio down")
+    provider.send_sms.side_effect = SmsProviderError("twilio down")
 
     service = MessagingService(message_manager=message_mgr, sms_provider=provider)
-    with pytest.raises(SmsProviderError):
+    with pytest.raises(SmsProviderError, match="twilio down"):
+        service.send_message(
+            db,
+            group=SimpleNamespace(id=uuid4()),
+            to_member=SimpleNamespace(id=uuid4(), phone_number="+15551112222"),
+            from_phone_number="+15559876543",
+            body="hi",
+        )
+    message_mgr.create_outbound.assert_not_called()
+
+
+def test_messaging_service_unexpected_errors_are_not_wrapped():
+    db = MagicMock()
+    message_mgr = MagicMock()
+    provider = MagicMock()
+    provider.send_sms.side_effect = RuntimeError("bug")
+
+    service = MessagingService(message_manager=message_mgr, sms_provider=provider)
+    with pytest.raises(RuntimeError, match="bug"):
         service.send_message(
             db,
             group=SimpleNamespace(id=uuid4()),
@@ -121,6 +144,7 @@ def test_approve_fans_out_original_body():
         member=recipient,
         member_id=recipient_id,
     )
+    membership_mgr.get_membership.return_value = None
 
     phone_mgr = MagicMock()
     phone_mgr.list_for_group.return_value = [
@@ -138,7 +162,12 @@ def test_approve_fans_out_original_body():
         messaging_service=messaging,
     )
 
-    result = service.approve(db, message_id, recipient_ids=[recipient_id])
+    result = service.approve(
+        db,
+        message_id,
+        group_id=group_id,
+        recipient_ids=[recipient_id],
+    )
 
     messaging.send_message.assert_called_once()
     call_kwargs = messaging.send_message.call_args.kwargs
@@ -146,6 +175,102 @@ def test_approve_fans_out_original_body():
     assert call_kwargs["parent_message_id"] == message_id
     assert result["workflow_status"] == MessageWorkflowStatus.DELIVERED.value
     assert result["delivered_outbound_ids"] == [str(outbound.id)]
+
+
+def test_approve_partial_fanout_sets_partially_delivered():
+    db = MagicMock()
+    message_id = uuid4()
+    group_id = uuid4()
+    sender_id = uuid4()
+    recipient_a = uuid4()
+    recipient_b = uuid4()
+
+    message = SimpleNamespace(
+        id=message_id,
+        group_id=group_id,
+        member_id=sender_id,
+        body="Need a ladder",
+        workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
+        group=SimpleNamespace(id=group_id),
+        suggested_recipient_ids=[recipient_a, recipient_b],
+        approved_recipient_ids=None,
+        intent="request_borrow",
+        confidence=0.4,
+        constraints={"object": "ladder"},
+        parent_message_id=None,
+        created_at=None,
+        processing_notes=None,
+    )
+    members = {
+        recipient_a: SimpleNamespace(
+            id=recipient_a, phone_number="+15552222222", name="A"
+        ),
+        recipient_b: SimpleNamespace(
+            id=recipient_b, phone_number="+15553333333", name="B"
+        ),
+    }
+
+    message_mgr = MagicMock()
+    message_mgr.find_by_id.return_value = message
+
+    def apply_approval(db, msg, *, approved_recipient_ids, workflow_status):
+        msg.approved_recipient_ids = approved_recipient_ids
+        msg.workflow_status = workflow_status
+        return msg
+
+    def set_status(db, msg, status, processing_notes=None):
+        msg.workflow_status = status
+        if processing_notes is not None:
+            msg.processing_notes = processing_notes
+        return msg
+
+    message_mgr.apply_approval.side_effect = apply_approval
+    message_mgr.set_workflow_status.side_effect = set_status
+
+    membership_mgr = MagicMock()
+
+    def get_active_membership(db, member_id, group_id):
+        member = members[member_id]
+        return SimpleNamespace(member=member, member_id=member_id)
+
+    membership_mgr.get_active_membership.side_effect = get_active_membership
+    membership_mgr.get_membership.return_value = None
+
+    phone_mgr = MagicMock()
+    phone_mgr.list_for_group.return_value = [
+        SimpleNamespace(status="assigned", phone_number="+15559876543")
+    ]
+
+    messaging = MagicMock()
+    outbound = SimpleNamespace(id=uuid4())
+
+    def send_message(db, **kwargs):
+        if kwargs["to_member"].id == recipient_b:
+            raise SmsProviderError("provider down")
+        return outbound
+
+    messaging.send_message.side_effect = send_message
+
+    service = ModerationService(
+        message_manager=message_mgr,
+        membership_manager=membership_mgr,
+        phone_number_manager=phone_mgr,
+        messaging_service=messaging,
+    )
+
+    result = service.approve(
+        db,
+        message_id,
+        group_id=group_id,
+        recipient_ids=[recipient_a, recipient_b],
+    )
+
+    assert (
+        result["workflow_status"]
+        == MessageWorkflowStatus.PARTIALLY_DELIVERED.value
+    )
+    assert result["delivered_outbound_ids"] == [str(outbound.id)]
+    assert len(result["delivery_failures"]) == 1
 
 
 def test_approve_rejects_empty_recipients():
@@ -161,13 +286,19 @@ def test_approve_rejects_empty_recipients():
     service = ModerationService(message_manager=message_mgr)
 
     with pytest.raises(InvalidRecipientsError):
-        service.approve(db, message.id, recipient_ids=[])
+        service.approve(
+            db,
+            message.id,
+            group_id=message.group_id,
+            recipient_ids=[],
+        )
 
 
 def test_approve_wrong_state():
     db = MagicMock()
     message = SimpleNamespace(
         id=uuid4(),
+        group_id=uuid4(),
         workflow_status=MessageWorkflowStatus.DELIVERED.value,
     )
     message_mgr = MagicMock()
@@ -175,7 +306,12 @@ def test_approve_wrong_state():
     service = ModerationService(message_manager=message_mgr)
 
     with pytest.raises(InvalidModerationStateError):
-        service.approve(db, message.id, recipient_ids=[uuid4()])
+        service.approve(
+            db,
+            message.id,
+            group_id=message.group_id,
+            recipient_ids=[uuid4()],
+        )
 
 
 def test_reject_message():
@@ -207,5 +343,16 @@ def test_reject_message():
     message_mgr.set_workflow_status.side_effect = set_status
     service = ModerationService(message_manager=message_mgr)
 
-    result = service.reject(db, message.id)
+    result = service.reject(db, message.id, group_id=message.group_id)
     assert result["workflow_status"] == MessageWorkflowStatus.MODERATOR_REJECTED.value
+
+
+def test_cross_group_message_is_not_visible():
+    db = MagicMock()
+    message = SimpleNamespace(id=uuid4(), group_id=uuid4())
+    message_mgr = MagicMock()
+    message_mgr.find_by_id.return_value = message
+    service = ModerationService(message_manager=message_mgr)
+
+    with pytest.raises(MessageNotFoundError, match="Message not found"):
+        service.get_message(db, message.id, group_id=uuid4())

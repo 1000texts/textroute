@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { createGroup } from "../api/groups";
 import { Field } from "../components/Field";
 
@@ -28,7 +29,7 @@ export function CreateGroup() {
         moderator_phone_number: phoneNumber.trim(),
       });
       setStatus(
-        `Created ${group.name} · line ${group.phone_number ?? "n/a"} · id ${group.id}`,
+        `Created ${group.name}. Group inbound number: ${group.phone_number}`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create group");
@@ -71,6 +72,9 @@ export function CreateGroup() {
 
       {status && <p className="message">{status}</p>}
       {error && <p className="message error">{error}</p>}
+      <Link className="page-link" to="/login">
+        [ Moderator login ]
+      </Link>
     </main>
   );
 }

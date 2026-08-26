@@ -1,3 +1,9 @@
+"""Outbound SMS: provider send first, then persist a ``sent`` outbound row.
+
+Used by moderation fan-out (and future automated sends). Callers own the
+surrounding transaction/commit for multi-recipient loops.
+"""
+
 import logging
 
 from sqlalchemy.orm import Session
@@ -13,9 +19,11 @@ logger = logging.getLogger(__name__)
 class MessagingService:
     """Outbound SMS orchestration.
 
-    Persists what TextRoute intended/sent; ``SmsProvider`` talks to the
-    outside world. Provider failures raise ``SmsProviderError`` after any
-    failed send attempt (no outbound row is written on provider failure).
+    Order matters: call ``SmsProvider`` before writing the outbound row so a
+    provider failure leaves no orphan message. ``SmsProviderError`` passes
+    through unchanged; other exceptions are not wrapped here.
+    Successful sends use workflow status ``sent`` (provider accepted), not
+    carrier delivery confirmation.
     """
 
     def __init__(
@@ -49,7 +57,7 @@ class MessagingService:
                 to_number=to_member.phone_number,
                 body=body,
             )
-        except Exception as exc:
+        except SmsProviderError:
             logger.exception(
                 "outbound_message_provider_failed",
                 extra={
@@ -57,7 +65,7 @@ class MessagingService:
                     "member_id": str(to_member.id),
                 },
             )
-            raise SmsProviderError(str(exc)) from exc
+            raise
 
         return self.message_manager.create_outbound(
             db,
@@ -68,5 +76,5 @@ class MessagingService:
             body=body,
             provider_message_id=provider_message_id,
             parent_message_id=parent_message_id,
-            workflow_status=MessageWorkflowStatus.DELIVERED.value,
+            workflow_status=MessageWorkflowStatus.SENT.value,
         )

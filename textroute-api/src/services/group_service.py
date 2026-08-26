@@ -1,4 +1,4 @@
-"""Group lifecycle orchestration.
+"""Group creation: moderator membership + assign an available TextRoute number.
 
 Managers flush only; this service owns ``commit`` / ``rollback``.
 """
@@ -14,6 +14,8 @@ from src.models import Group
 
 
 class GroupService:
+    """Bootstrap a group for the vertical slice (one assigned line per group)."""
+
     def __init__(
         self,
         group_manager: GroupManager | None = None,
@@ -32,6 +34,7 @@ class GroupService:
         description: str | None,
         moderator_phone_number: str,
     ) -> dict:
+        """Atomic create: group + moderator membership + phone assignment."""
         moderator = self.membership_manager.get_or_create_by_phone(
             db,
             moderator_phone_number,
@@ -67,43 +70,6 @@ class GroupService:
             "phone_number": phone_number.phone_number,
         }
 
-    def add_member(
-        self,
-        db: Session,
-        *,
-        group_id: UUID,
-        phone_number: str,
-        name: str | None = None,
-        role: str = "member",
-    ) -> dict:
-        group = db.query(Group).filter(Group.id == group_id).first()
-        if group is None:
-            raise LookupError("Group not found.")
-
-        member = self.membership_manager.get_or_create_by_phone(db, phone_number)
-        if name and not member.name:
-            member.name = name
-            db.add(member)
-            db.flush()
-
-        membership = self.membership_manager.join_group(
-            db,
-            member_id=member.id,
-            group_id=group.id,
-            role=role,
-            status="active",
-        )
-        db.commit()
-
-        return {
-            "id": str(member.id),
-            "group_id": str(group.id),
-            "phone_number": member.phone_number,
-            "name": member.name,
-            "role": membership.role,
-            "status": membership.status,
-        }
-
     def list_members(self, db: Session, group_id: UUID) -> list[dict]:
         group = db.query(Group).filter(Group.id == group_id).first()
         if group is None:
@@ -114,7 +80,11 @@ class GroupService:
             {
                 "id": str(m.member.id),
                 "phone_number": m.member.phone_number,
-                "name": m.member.name,
+                "name": (
+                    m.profile.display_name
+                    if m.profile is not None
+                    else m.member.name
+                ),
                 "role": m.role,
                 "status": m.status,
             }

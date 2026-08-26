@@ -94,6 +94,9 @@ CREATE TABLE public.membership_consents (
     CONSTRAINT membership_consents_version_check
         CHECK (consent_version >= 1),
 
+    CONSTRAINT membership_consents_membership_type_unique
+        UNIQUE (membership_id, consent_type),
+
     CONSTRAINT membership_consents_type_check
         CHECK (consent_type IN (
             'group_membership',

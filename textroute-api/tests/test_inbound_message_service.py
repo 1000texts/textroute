@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.core.message_processor import MemberContext, MessageProcessor, ProcessingResult
 from src.core.phone_normalize import InvalidPhoneNumberError, normalize_phone_number
@@ -258,6 +259,105 @@ def test_duplicate_provider_message():
     assert exc.value.message_id == str(existing_id)
     message_mgr.create_inbound.assert_not_called()
 
+
+def test_concurrent_duplicate_provider_message():
+    db = MagicMock()
+    group_id = uuid4()
+    existing_id = uuid4()
+
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id),
+    )
+
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=uuid4(), phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.side_effect = [
+        None,
+        SimpleNamespace(id=existing_id),
+    ]
+    message_mgr.create_inbound.side_effect = IntegrityError(
+        "duplicate provider message id",
+        params={},
+        orig=Exception("unique constraint violation"),
+    )
+
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+    )
+
+    with pytest.raises(DuplicateInboundMessageError) as exc:
+        service.handle_incoming_message(
+            db,
+            from_phone_number="+15551234567",
+            to_phone_number="+15559876543",
+            body="hello",
+            provider_message_id="SM_RACE",
+        )
+
+    assert exc.value.message_id == str(existing_id)
+    assert message_mgr.find_by_provider_message_id.call_count == 2
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()
+
+
+def test_unrelated_integrity_error_is_not_reported_as_duplicate():
+    db = MagicMock()
+    group_id = uuid4()
+
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id),
+    )
+
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=uuid4(), phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+
+    integrity_error = IntegrityError(
+        "foreign key violation",
+        params={},
+        orig=Exception("unrelated integrity error"),
+    )
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.side_effect = [None, None]
+    message_mgr.create_inbound.side_effect = integrity_error
+
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+    )
+
+    with pytest.raises(IntegrityError) as exc:
+        service.handle_incoming_message(
+            db,
+            from_phone_number="+15551234567",
+            to_phone_number="+15559876543",
+            body="hello",
+            provider_message_id="SM_NOT_DUP",
+        )
+
+    assert exc.value is integrity_error
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()
 
 def test_processor_failure_marks_processing_failed():
     db = MagicMock()

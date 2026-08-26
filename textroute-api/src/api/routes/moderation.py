@@ -3,8 +3,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from src.api.dependencies import get_moderator_context
 from src.db.db import get_db
 from src.schemas.api import ApproveMessageRequest
+from src.services.auth_service import ModeratorContext
 from src.services.moderation_service import (
     InvalidModerationStateError,
     InvalidRecipientsError,
@@ -16,15 +18,26 @@ from src.services.moderation_service import (
 router = APIRouter(tags=["moderation"])
 
 
-@router.get("/groups/{group_id}/moderation/queue")
-def moderation_queue(group_id: UUID, db: Session = Depends(get_db)):
-    return ModerationService().list_queue(db, group_id)
+@router.get("/moderation/queue")
+def moderation_queue(
+    context: ModeratorContext = Depends(get_moderator_context),
+    db: Session = Depends(get_db),
+):
+    return ModerationService().list_queue(db, context.group_id)
 
 
 @router.get("/messages/{message_id}")
-def get_message(message_id: UUID, db: Session = Depends(get_db)):
+def get_message(
+    message_id: UUID,
+    context: ModeratorContext = Depends(get_moderator_context),
+    db: Session = Depends(get_db),
+):
     try:
-        return ModerationService().get_message(db, message_id)
+        return ModerationService().get_message(
+            db,
+            message_id,
+            group_id=context.group_id,
+        )
     except MessageNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -33,12 +46,14 @@ def get_message(message_id: UUID, db: Session = Depends(get_db)):
 def approve_message(
     message_id: UUID,
     request: ApproveMessageRequest,
+    context: ModeratorContext = Depends(get_moderator_context),
     db: Session = Depends(get_db),
 ):
     try:
         return ModerationService().approve(
             db,
             message_id,
+            group_id=context.group_id,
             recipient_ids=request.recipient_ids,
         )
     except MessageNotFoundError as e:
@@ -62,9 +77,17 @@ def approve_message(
 
 
 @router.post("/messages/{message_id}/reject")
-def reject_message(message_id: UUID, db: Session = Depends(get_db)):
+def reject_message(
+    message_id: UUID,
+    context: ModeratorContext = Depends(get_moderator_context),
+    db: Session = Depends(get_db),
+):
     try:
-        return ModerationService().reject(db, message_id)
+        return ModerationService().reject(
+            db,
+            message_id,
+            group_id=context.group_id,
+        )
     except MessageNotFoundError as e:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(e)) from e

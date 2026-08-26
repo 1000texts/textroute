@@ -28,4 +28,6 @@ jobs:
       - name: Run unit tests
         env:
           DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+          AUTH_SECRET: test-secret-at-least-thirty-two-characters
+          AUTH_COOKIE_SECURE: "false"
         run: pytest -q

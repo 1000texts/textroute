@@ -106,7 +106,7 @@ class MessageManager:
         body: str,
         provider_message_id: str | None = None,
         parent_message_id: UUID | None = None,
-        workflow_status: str = MessageWorkflowStatus.DELIVERED.value,
+        workflow_status: str = MessageWorkflowStatus.SENT.value,
     ) -> Message:
         message = Message(
             group_id=group_id,
