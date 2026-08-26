@@ -8,6 +8,7 @@ from src.models.member_item import MemberItem
 from src.models.member_profile import MemberProfile
 from src.models.member_skill import MemberSkill
 from src.models.membership_consent import MembershipConsent
+from src.models.message import Message
 from src.models.phone_number import PhoneNumber
 from src.models.requests import Requests
 
@@ -22,6 +23,7 @@ __all__ = [
     "MemberProfile",
     "MemberSkill",
     "MembershipConsent",
+    "Message",
     "PhoneNumber",
     "Requests",
 ]

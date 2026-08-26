@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-docker compose \
-  -f infra/docker-compose.dev.yml \
-  down
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
 
-echo "🛑 Dev stack stopped"
+docker compose -f docker-compose.dev.yml down
+echo "Dev stack stopped"

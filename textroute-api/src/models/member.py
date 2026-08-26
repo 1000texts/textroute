@@ -10,6 +10,7 @@ from src.models.base import Base
 
 if TYPE_CHECKING:
     from src.models.group_membership import GroupMembership
+    from src.models.message import Message
     from src.models.requests import Requests
 
 
@@ -36,6 +37,9 @@ class Member(Base):
     )
 
     memberships: Mapped[list["GroupMembership"]] = relationship(
+        back_populates="member",
+    )
+    messages: Mapped[list["Message"]] = relationship(
         back_populates="member",
     )
     requests: Mapped[list["Requests"]] = relationship(

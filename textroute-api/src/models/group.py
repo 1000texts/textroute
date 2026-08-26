@@ -10,6 +10,7 @@ from src.models.base import Base
 if TYPE_CHECKING:
     from src.models.group_membership import GroupMembership
     from src.models.phone_number import PhoneNumber
+    from src.models.message import Message
 
 
 class Group(Base):
@@ -43,6 +44,9 @@ class Group(Base):
         back_populates="group",
     )
     phone_numbers: Mapped[list["PhoneNumber"]] = relationship(
+        back_populates="group",
+    )
+    messages: Mapped[list["Message"]] = relationship(
         back_populates="group",
     )
 

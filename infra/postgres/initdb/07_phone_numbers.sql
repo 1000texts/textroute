@@ -26,3 +26,12 @@ CREATE TABLE public.phone_numbers (
             'released'
         ))
 );
+
+-- Dev seed pool (E.164). Replace with real Twilio numbers in production.
+INSERT INTO public.phone_numbers (phone_number, status, provider)
+VALUES
+    ('+15550001001', 'available', 'dev'),
+    ('+15550001002', 'available', 'dev'),
+    ('+15550001003', 'available', 'dev'),
+    ('+15550001004', 'available', 'dev'),
+    ('+15550001005', 'available', 'dev');

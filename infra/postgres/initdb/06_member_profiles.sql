@@ -1,17 +1,4 @@
-CREATE TABLE public.members (
-    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-
-    phone_number varchar(16) NOT NULL,
-    name varchar(100) NULL,
-
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-
-    CONSTRAINT members_phone_number_unique
-        UNIQUE (phone_number)
-);
-
-
+-- Runs after groups + group_memberships (06_groups.sql).
 
 CREATE TABLE public.member_profiles (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -29,8 +16,6 @@ CREATE TABLE public.member_profiles (
         UNIQUE (membership_id)
 );
 
-
-
 CREATE TABLE public.member_items (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
 
@@ -43,8 +28,6 @@ CREATE TABLE public.member_items (
 
     created_at timestamptz NOT NULL DEFAULT now()
 );
-
-
 
 CREATE TABLE public.member_skills (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -59,7 +42,6 @@ CREATE TABLE public.member_skills (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
-
 CREATE TABLE public.member_interests (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
 
@@ -70,7 +52,6 @@ CREATE TABLE public.member_interests (
 
     created_at timestamptz NOT NULL DEFAULT now()
 );
-
 
 CREATE TABLE public.member_availability (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -120,4 +101,3 @@ CREATE TABLE public.membership_consents (
             'profile_sharing'
         ))
 );
-

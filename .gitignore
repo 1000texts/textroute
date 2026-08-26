@@ -240,5 +240,6 @@ docker-compose.yml
 
 # Infrastructure
 infra/postgres/data/
+infra/postgres/pgvector/
 infra/nginx/certs/
 infra/nginx/conf.d/

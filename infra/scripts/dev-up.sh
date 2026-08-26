@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "🚀 Starting TextRoute dev environment..."
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
 
-docker compose \
-  -f infra/docker-compose.dev.yml \
-  up --build -d
-
-echo "✅ Dev stack running"
+echo "Starting TextRoute dev environment..."
+docker compose -f docker-compose.dev.yml up --build -d
+echo "Dev stack running (API :6060, SMS sim :5173, docs :8000)"

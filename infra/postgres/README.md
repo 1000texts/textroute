@@ -1,20 +1,4 @@
-This project uses Postgres' vector column.
-Create a Docker container by using the pgvector-enabled image.
+This service uses the published `pgvector/pgvector:pg17` image (see root
+`docker-compose.*.yml`). Schema lives in `initdb/` and is applied on first boot.
 
-Example:
-
-services:
-  postgres:
-    image: pgvector/pgvector:pg17
-    container_name: postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: change-me
-      POSTGRES_DB: postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-volumes:
-  pgdata:
+Do not vendor the pgvector source tree into this repo.

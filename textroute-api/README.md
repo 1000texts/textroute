@@ -1,85 +1,52 @@
-⸻
+# textroute-api
 
-🔁 Message Flow (High-Level)
- 1. Message Sent
-   • A user sends a text message to the system.
- 2. AI Interpretation
-   • The server analyzes the message to determine:
-   • Intent (e.g., request, offer, announcement)
-   • Constraints (location, availability, relevance)
-   • Context (past interactions, opt-in signals)
- 3. Moderator Review
-   • The system sends a summary to a human moderator:
-   • Who sent the message
-   • Interpreted intent and need
-   • Suggested recipient list (with reasoning)
- 4. Recipient Confirmation
-   • The moderator can:
-   • Approve the suggested recipients
-   • Modify the list
-   • Expand or restrict delivery
- 5. Message Delivery
-   • Messages are sent to confirmed recipients only.
- 6. Recipient Responses
-   • Recipients reply to the server (not directly to the sender).
- 7. AI Summarization
-   • Responses are analyzed and summarized.
- 8. Moderator Decision (Optional)
-   • The moderator receives a summary and can:
-   • Take further action
-   • Share updates
-   • Close the loop
+FastAPI service for TextRoute: inbound SMS webhooks, group creation, and (soon) intent-based routing with human moderation.
 
-This human-in-the-loop design ensures accountability, trust, and social safety.
+## Package layout
 
+```
+src/
+  api/routes/     # Thin HTTP adapters
+  services/       # Use-case orchestration; owns db.commit()
+  core/           # *Manager (flush only), phone_normalize, MessageProcessor
+  models/         # SQLAlchemy ORM
+  schemas/api.py  # HTTP DTOs
+  schemas/intent/ # Structured AI outputs
+  domain/         # Intent types + routing maps
+  ai/             # LLM / embedding helpers (future processor wiring)
+  config/         # Env + YAML loaders
+  db/             # Engine + session (get_db)
+tests/            # Unit tests (mocked DB for inbound flow)
+```
 
+Entry point: `src.main:app`.
 
+## Common endpoints
 
-workflow manager
-conversation manager
-AI agent, 
-  User message
-     │
-     ▼
-┌─────────────────────────┐
-│ Small AI model          │
-│ Intent + Entity Parser  │
-└────────────┬────────────┘
-             │
-             ▼
-      Structured request
-             │
-             ▼
-┌─────────────────────────┐
-│ Embedding model         │  ← AI, but NOT generative AI
-└────────────┬────────────┘
-             │
-             ▼
-      Vector similarity
-             │
-             ▼
-┌─────────────────────────┐
-│ TextRoute Core Logic    │  ← YOUR custom logic
-│                         │
-│ • filters               │
-│ • constraints           │
-│ • distance              │
-│ • availability          │
-│ • relevance             │
-│ • provider attributes   │
-│ • scoring               │
-└────────────┬────────────┘
-             │
-             ▼
-       Ranked candidates
-             │
-             ▼
-┌─────────────────────────┐
-│ Generative LLM          │  ← limited involvement
-│                         │
-│ Turn results into       │
-│ natural conversation    │
-└─────────────────────────┘
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/groups` | Create group + assign TextRoute number |
+| `POST` | `/webhook/messages` | Inbound SMS (`from` / `to` / `body`) |
+| `POST` | `/webhook/inbound` | Alias of `/webhook/messages` |
+| `GET` | `/` | Health |
 
-routing service
-clean interfaces
+## Local commands
+
+```bash
+pip install -r requirements.txt
+pip install -e ".[dev]"
+pytest
+uvicorn src.main:app --reload --port 6060
+```
+
+Docker Compose (from repo root) is the preferred full stack. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## Product message flow
+
+1. Member texts a TextRoute number.
+2. API resolves line → group → member, persists the message.
+3. `MessageProcessor` will classify intent / suggest recipients (stub today).
+4. Moderator confirms recipients.
+5. Outbound delivery goes through `MessagingService` (provider integration later).
+
+Human-in-the-loop review is intentional: accountability and social safety over fully automated fan-out.
