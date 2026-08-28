@@ -6,11 +6,22 @@ CREATE TABLE public.groups (
 
     status varchar(20) NOT NULL DEFAULT 'active',
 
+    -- How a NEW_REQUEST from this group is routed. Replies are unaffected.
+    -- 'auto_matched' is reserved: accepted by the constraint, not yet implemented.
+    routing_policy varchar(32) NOT NULL DEFAULT 'moderator_required',
+
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT groups_status_check
-        CHECK (status IN ('active', 'inactive'))
+        CHECK (status IN ('active', 'inactive')),
+
+    CONSTRAINT groups_routing_policy_check
+        CHECK (routing_policy IN (
+            'moderator_required',
+            'auto_group',
+            'auto_matched'
+        ))
 );
 
 

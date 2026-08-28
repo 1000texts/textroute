@@ -5,6 +5,7 @@ from sqlalchemy import CheckConstraint, DateTime, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from src.domain.routing_policy import RoutingPolicy
 from src.models.base import Base
 
 if TYPE_CHECKING:
@@ -27,6 +28,12 @@ class Group(Base):
         String(20),
         nullable=False,
         server_default=text("'active'"),
+    )
+    # Governs how a NEW_REQUEST is routed; replies are never policy-driven.
+    routing_policy: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=text(f"'{RoutingPolicy.MODERATOR_REQUIRED.value}'"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -54,5 +61,10 @@ class Group(Base):
         CheckConstraint(
             "status IN ('active', 'inactive')",
             name="groups_status_check",
+        ),
+        CheckConstraint(
+            "routing_policy IN "
+            "('moderator_required', 'auto_group', 'auto_matched')",
+            name="groups_routing_policy_check",
         ),
     )

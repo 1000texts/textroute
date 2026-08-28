@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     Float,
@@ -22,6 +23,7 @@ from src.models.base import Base
 if TYPE_CHECKING:
     from src.models.group import Group
     from src.models.member import Member
+    from src.models.requests import Requests
 
 
 class Message(Base):
@@ -44,6 +46,19 @@ class Message(Base):
         nullable=True,
         index=True,
     )
+    # Request lifecycle membership is distinct from parent_message_id's
+    # message-to-message relationship.
+    request_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("requests.id", name="messages_request_id_fkey"),
+        nullable=True,
+        index=True,
+    )
+    # Message-graph edge, not a Conversation entity.
+    # For fan-out copies and replies: points at the *original routed inbound*
+    # (star topology). Do not retarget to the immediately preceding SMS.
+    # A future Conversation/Thread may group these; parent_message_id alone
+    # is not the full definition of a conversation.
     parent_message_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("messages.id"),
@@ -61,13 +76,21 @@ class Message(Base):
         nullable=False,
         server_default=text(f"'{MessageWorkflowStatus.RECEIVED.value}'"),
     )
+    # What this inbound message was determined to be. NULL on outbound copies.
+    # Distinct from parent_message_id, which is a relationship, not a kind.
+    kind: Mapped[str | None] = mapped_column(String(20))
+    # Snapshot of the group policy in force when this request was handled, so
+    # later policy changes cannot rewrite history. NULL for replies/outbound.
+    routing_policy: Mapped[str | None] = mapped_column(String(32))
     intent: Mapped[str | None] = mapped_column(String(64))
     constraints: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     confidence: Mapped[float | None] = mapped_column(Float)
     suggested_recipient_ids: Mapped[list[UUID] | None] = mapped_column(
         ARRAY(PG_UUID(as_uuid=True))
     )
-    approved_recipient_ids: Mapped[list[UUID] | None] = mapped_column(
+    # Who this was routed to — true whether a moderator approved or a policy
+    # authorized it. Pair with workflow_status to tell which happened.
+    routed_recipient_ids: Mapped[list[UUID] | None] = mapped_column(
         ARRAY(PG_UUID(as_uuid=True))
     )
     processing_notes: Mapped[str | None] = mapped_column(Text)
@@ -86,6 +109,10 @@ class Message(Base):
 
     group: Mapped["Group"] = relationship(back_populates="messages")
     member: Mapped["Member | None"] = relationship(back_populates="messages")
+    request: Mapped["Requests | None"] = relationship(
+        foreign_keys=[request_id],
+        back_populates="messages",
+    )
     parent: Mapped["Message | None"] = relationship(
         remote_side=[id],
         foreign_keys=[parent_message_id],
@@ -99,8 +126,18 @@ class Message(Base):
         CheckConstraint(
             "workflow_status IN ("
             "'received', 'processing', 'awaiting_moderator', 'approved', "
-            "'delivering', 'sent', 'delivered', 'partially_delivered', "
-            "'processing_failed', 'moderator_rejected', 'delivery_failed')",
+            "'auto_authorized', 'delivering', 'sent', 'delivered', "
+            "'partially_delivered', 'processing_failed', 'moderator_rejected', "
+            "'delivery_failed')",
             name="messages_workflow_status_check",
+        ),
+        CheckConstraint(
+            "kind IS NULL OR kind IN ('new_request', 'reply')",
+            name="messages_kind_check",
+        ),
+        CheckConstraint(
+            "routing_policy IS NULL OR routing_policy IN "
+            "('moderator_required', 'auto_group', 'auto_matched')",
+            name="messages_routing_policy_check",
         ),
     )
