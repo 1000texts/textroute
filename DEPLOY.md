@@ -115,10 +115,13 @@ mistake away from gone:
 ./infra/scripts/backup-db.sh
 ```
 
-Run it nightly from cron:
+Run it nightly by dropping a file at `/etc/cron.d/textroute-backup`. Note the
+`root` field, which a `crontab -e` entry does not have:
 
 ```
-15 3 * * * cd /srv/www/textroute && ./infra/scripts/backup-db.sh >> /var/log/textroute-backup.log 2>&1
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+15 3 * * * root cd /srv/www/textroute && ./infra/scripts/backup-db.sh >> /var/log/textroute-backup.log 2>&1
 ```
 
 ## Security notes
