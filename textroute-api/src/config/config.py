@@ -12,6 +12,8 @@ def _env_list(name: str, default: str = "") -> list[str]:
 
 class Config:
     DATABASE_URL = os.getenv("DATABASE_URL")
+    # Echo SQL and bound parameters. Development aid only; see db/db.py.
+    SQL_ECHO = _env_bool("SQL_ECHO", False)
     LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH")
     LLM_EMBEDDING_MODEL_GGUF = os.getenv("LLM_EMBEDDING_MODEL_GGUF")
     SMS_PROVIDER = os.getenv("SMS_PROVIDER", "logging")

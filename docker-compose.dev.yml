@@ -39,6 +39,7 @@ services:
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-textroute_session}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+      SQL_ECHO: ${SQL_ECHO:-true}
       MODERATOR_WEB_ORIGIN: ${MODERATOR_WEB_ORIGIN:-http://localhost:5174}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       LLM_MODEL_PATH: ${LLM_MODEL_PATH}
