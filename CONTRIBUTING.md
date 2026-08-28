@@ -15,6 +15,9 @@ cp .env.example .env
 # Edit LLM_MODELS_HOST_PATH (or point it at an empty dir for API-only work)
 
 docker compose -f docker-compose.dev.yml up --build
+
+# Include the moderator UI in the stack (optional)
+docker compose -f docker-compose.dev.yml --profile ui up --build
 ```
 
 | Service | URL |
@@ -22,9 +25,16 @@ docker compose -f docker-compose.dev.yml up --build
 | API | http://localhost:6060 |
 | SMS simulator | http://localhost:5173 |
 | Docs | http://localhost:8000 |
-| Moderator UI | run locally — see `moderator-web/` |
+| Moderator UI | http://localhost:5174 (`--profile ui`, or run locally — see `moderator-web/`) |
+
+The moderator UI is behind the `ui` profile so the default stack stays lean. Running
+it on the host with `npm run dev` is still supported and gives faster hot reload; either
+way it must be served from `http://localhost:5174`, since that origin is what the API
+allows for CORS and scopes the session cookie to.
 
 Postgres schema is applied from `infra/postgres/initdb/` on **first** volume create. To reset schema: `docker compose -f docker-compose.dev.yml down -v` then bring the stack up again.
+
+There are no migrations yet, so any change under `infra/postgres/initdb/` needs that reset before it takes effect locally. Recent additions requiring one: `groups.routing_policy`, `messages.kind`, `messages.routing_policy`, and the rename of `messages.approved_recipient_ids` to `routed_recipient_ids`.
 
 Generate a local moderator-auth secret before starting:
 
@@ -52,12 +62,12 @@ Helper scripts (from repo root):
 Layers (do not skip or invert):
 
 ```
-api/routes  →  services  →  core (*_manager)  →  models / db
+api/routes  →  services  →  core (managers/providers/processors)  →  models / db
 ```
 
 | Layer | Responsibility |
 |-------|----------------|
-| `api/routes` | HTTP only: parse request, map domain errors → status codes |
+| `api/routes` | HTTP only: grouped by trust boundary; parse request, map domain errors → status codes |
 | `services` | Orchestration; owns `db.commit()` / `db.rollback()` |
 | `core` | Persistence managers (`flush` only), phone normalize, `MessageProcessor`, `SmsProvider` |
 | `models` | SQLAlchemy ORM |
@@ -67,9 +77,20 @@ api/routes  →  services  →  core (*_manager)  →  models / db
 Rules of thumb:
 
 - Phone numbers are identity keys — always normalize to E.164 via `normalize_phone_number`.
-- Managers never commit.
+- Managers use `db.flush()` only: flush makes generated values available within
+  the current transaction; it does not make changes durable.
+- Services own the business transaction and decide when to `db.commit()` or
+  `db.rollback()`. Routes may defensively roll back after an exception, but
+  must not commit or split a service transaction.
 - Protected group mutations derive `group_id` from the moderator's server-side
   session; never trust a group ID or inbound number supplied by the browser.
+- Cookie auth CSRF stance is documented in `textroute-api/README.md` (SameSite=Lax
+  + same-site UI/API). Revisit before any cross-site cookie deployment.
+- `parent_message_id` = message-graph link to the original routed inbound (not a
+  Conversation entity). The 72h fan-out reply heuristic is temporary scaffolding;
+  see `textroute-api/README.md`.
+- New routing requests default to group-wide suggestions; the processor recommends,
+  the moderator decides. Do not treat profile matches as the only recipients.
 - Prefer small PRs that touch one concern (schema, route, service, tests).
 
 Product vision and message flow live in [textroute-api/README.md](textroute-api/README.md) and [docs/mkdocs/](docs/mkdocs/).
@@ -98,9 +119,8 @@ CI runs the same `pytest` job on pull requests.
 ## Debugging the API in VS Code / Cursor
 
 Use the **TextRoute API** launch config (loads `${workspaceFolder}/.env`).
-When the API runs on the host against Compose Postgres, set `DATABASE_URL` to use
-`localhost` (see the commented example in `.env.example`). Compose services keep
-using host `postgres`.
+`DATABASE_URL` must use host `localhost` for host-run debugging. Compose sets
+the API container to `DATABASE_URL_DOCKER` (host `postgres`). See `.env.example`.
 
 ## Questions
 

@@ -1,3 +1,5 @@
+"""Authenticated member-directory and member-enrollment routes."""
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 

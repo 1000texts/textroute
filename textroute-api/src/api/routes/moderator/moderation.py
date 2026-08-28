@@ -1,3 +1,5 @@
+"""Authenticated moderator review and fan-out routes."""
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +26,16 @@ def moderation_queue(
     db: Session = Depends(get_db),
 ):
     return ModerationService().list_queue(db, context.group_id)
+
+
+# Declared before /messages/{message_id} so the static path wins the match.
+@router.get("/messages")
+def list_messages(
+    context: ModeratorContext = Depends(get_moderator_context),
+    db: Session = Depends(get_db),
+):
+    """All inbound messages for the group, not just those needing review."""
+    return ModerationService().list_messages(db, context.group_id)
 
 
 @router.get("/messages/{message_id}")

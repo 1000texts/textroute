@@ -1,3 +1,10 @@
+"""Persistence helpers for moderator auth.
+
+Flush only — never ``commit`` / ``rollback``. ``ModeratorAuthService`` owns the
+business transaction so verify can atomically consume a challenge and create a
+session in one commit.
+"""
+
 from datetime import datetime
 from uuid import UUID
 
@@ -7,7 +14,7 @@ from src.models import ModeratorLoginChallenge, ModeratorSession
 
 
 class AuthManager:
-    """Persistence helpers for moderator auth. Flush only; services commit."""
+    """DB operations for challenges and sessions (flush only)."""
 
     def create_challenge(
         self,
@@ -35,6 +42,7 @@ class AuthManager:
         db: Session,
         challenge_id: UUID,
     ) -> ModeratorLoginChallenge | None:
+        """Row lock so concurrent verifies cannot double-consume."""
         return (
             db.query(ModeratorLoginChallenge)
             .filter(ModeratorLoginChallenge.id == challenge_id)

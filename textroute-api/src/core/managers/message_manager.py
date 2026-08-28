@@ -23,37 +23,53 @@ class MessageManager:
             .first()
         )
 
-    def list_by_workflow_status(
+    def list_inbound_for_group(
         self,
         db: Session,
         *,
         group_id: UUID,
-        statuses: list[str],
-        limit: int = 50,
+        statuses: list[str] | None = None,
+        limit: int = 100,
     ) -> list[Message]:
-        return (
-            db.query(Message)
-            .filter(
-                Message.group_id == group_id,
-                Message.direction == "inbound",
-                Message.workflow_status.in_(statuses),
-            )
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-            .all()
-        )
+        """Inbound messages for one group, newest first.
 
-    def find_recent_fanout_to_member(
+        Outbound fan-out copies are excluded from the moderator message feed:
+        they are delivery records, not things a moderator reads. Delivery
+        surfaces through the selected message's detail view (routed recipients
+        plus the aggregate delivered / partially_delivered status).
+
+        ``statuses=None`` returns every workflow state.
+        """
+        query = db.query(Message).filter(
+            Message.group_id == group_id,
+            Message.direction == "inbound",
+        )
+        if statuses is not None:
+            query = query.filter(Message.workflow_status.in_(statuses))
+        return query.order_by(Message.created_at.desc()).limit(limit).all()
+
+    def find_original_request_candidate_for_member(
         self,
         db: Session,
         *,
         group_id: UUID,
         member_id: UUID,
-        within_hours: int = 72,
+        within_hours: int = 2,
     ) -> Message | None:
-        """Latest outbound fan-out copy delivered to this member (if any)."""
+        """Return the original request this member most recently received, if any.
+
+        Named for what the lookup *discovers* — which request reached this member
+        recently — rather than for what their next message might be. It is a
+        candidate, not proof: timing alone cannot tell "I have an axe" from an
+        unrelated "what time is the meeting?", so the window is deliberately
+        short to keep false positives rare rather than merely likely.
+
+        Real conversation detection belongs in a future
+        ``MessageRelationshipResolver`` (timing + recipient history + semantics,
+        LLM when ambiguous). Don't grow this into that.
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=within_hours)
-        return (
+        recent_fanout = (
             db.query(Message)
             .filter(
                 Message.group_id == group_id,
@@ -65,6 +81,10 @@ class MessageManager:
             .order_by(Message.created_at.desc())
             .first()
         )
+        if recent_fanout is None:
+            return None
+        # The fan-out copy is the evidence; its parent is the request itself.
+        return recent_fanout.parent
 
     def create_inbound(
         self,
@@ -160,15 +180,70 @@ class MessageManager:
         db.flush()
         return message
 
+    def record_routing_context(
+        self,
+        db: Session,
+        message: Message,
+        *,
+        kind: str,
+        routing_policy: str | None = None,
+    ) -> Message:
+        """Persist what this message is, and (for requests) the policy applied.
+
+        ``routing_policy`` is a snapshot: changing the group's policy afterwards
+        must not rewrite why this message was handled the way it was.
+        """
+        message.kind = kind
+        if routing_policy is not None:
+            message.routing_policy = routing_policy
+        db.add(message)
+        db.flush()
+        return message
+
     def apply_approval(
         self,
         db: Session,
         message: Message,
         *,
-        approved_recipient_ids: list[UUID],
+        routed_recipient_ids: list[UUID],
         workflow_status: str = MessageWorkflowStatus.APPROVED.value,
     ) -> Message:
-        message.approved_recipient_ids = approved_recipient_ids
+        """A moderator chose these recipients."""
+        return self._apply_routing_decision(
+            db,
+            message,
+            routed_recipient_ids=routed_recipient_ids,
+            workflow_status=workflow_status,
+        )
+
+    def apply_routing_authorization(
+        self,
+        db: Session,
+        message: Message,
+        *,
+        routed_recipient_ids: list[UUID],
+    ) -> Message:
+        """A group policy authorized these recipients — no moderator acted.
+
+        Same machinery as ``apply_approval``, deliberately different status, so
+        the stored row never implies a human reviewed this message.
+        """
+        return self._apply_routing_decision(
+            db,
+            message,
+            routed_recipient_ids=routed_recipient_ids,
+            workflow_status=MessageWorkflowStatus.AUTO_AUTHORIZED.value,
+        )
+
+    def _apply_routing_decision(
+        self,
+        db: Session,
+        message: Message,
+        *,
+        routed_recipient_ids: list[UUID],
+        workflow_status: str,
+    ) -> Message:
+        message.routed_recipient_ids = routed_recipient_ids
         message.workflow_status = workflow_status
         db.add(message)
         db.flush()

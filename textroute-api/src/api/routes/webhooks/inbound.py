@@ -1,3 +1,5 @@
+"""Inbound SMS provider webhooks."""
+
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,7 +47,11 @@ def receive_message(
             status_code=409,
             detail={"status": "duplicate", "message_id": e.message_id},
         ) from e
-    except (UnknownReceivingNumberError, UnassignedPhoneNumberError, UnknownSenderError) as e:
+    except (
+        UnknownReceivingNumberError,
+        UnassignedPhoneNumberError,
+        UnknownSenderError,
+    ) as e:
         db.rollback()
         logger.warning("inbound_message_not_found", extra={"detail": str(e)})
         raise HTTPException(status_code=404, detail=str(e)) from e

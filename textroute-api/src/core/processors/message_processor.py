@@ -20,7 +20,9 @@ class MemberContext:
 class ProcessingResult:
     """AI / heuristic recommendation — not a delivery decision.
 
-    The application (moderator + MessagingService) decides what happens next.
+    Suggested recipients are a starting set for the moderator, never an
+    irreversible "only these people" decision. The application (moderator UI +
+    ``MessagingService``) chooses who actually receives the SMS.
     """
 
     intent: str
@@ -36,6 +38,12 @@ class MessageProcessor:
     """Pure application/domain boundary: Message + context → ProcessingResult.
 
     Does not send SMS, commit transactions, or mutate memberships.
+
+    Product rule for new routing requests: the safe default audience is the
+    whole group (all other active members). Profiles / history are *signals*
+    for future narrower suggestions — not the sole source of truth. When
+    confidence is low, the community is the search engine; the moderator may
+    still narrow or expand before fan-out.
     """
 
     def process(
@@ -46,6 +54,7 @@ class MessageProcessor:
         candidates: list[MemberContext],
     ) -> ProcessingResult:
         intent, confidence, constraints = self._classify(message_body)
+        # v1: suggest every other active member (group-wide default).
         recipients = [c for c in candidates if c.id != sender_id]
         reasons = {
             c.id: self._reason_for(c, intent)

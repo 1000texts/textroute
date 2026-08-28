@@ -1,9 +1,15 @@
+"""Moderator web-app authentication routes.
+
+Challenge and verification start unauthenticated; session, logout, and
+moderator context are managed through the cookie-based auth flow.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from src.api.dependencies import get_moderator_context
 from src.config.config import Config
-from src.core.sms_provider import SmsProviderError
+from src.core.providers.sms_provider import SmsProviderError
 from src.db.db import get_db
 from src.schemas.api import (
     ModeratorChallengeResponse,
@@ -79,6 +85,7 @@ def verify_challenge(
         max_age=Config.AUTH_SESSION_TTL_SECONDS,
         httponly=True,
         secure=Config.AUTH_COOKIE_SECURE,
+        # SameSite=Lax: deliberate CSRF stance for same-site UI↔API. See README.
         samesite="lax",
         path="/",
     )
