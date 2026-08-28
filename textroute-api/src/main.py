@@ -7,9 +7,13 @@ from src.config.config import Config
 
 app = FastAPI()
 
+allowed_origins = list(
+    dict.fromkeys([Config.MODERATOR_WEB_ORIGIN, *Config.CORS_ALLOWED_ORIGINS])
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[Config.MODERATOR_WEB_ORIGIN],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

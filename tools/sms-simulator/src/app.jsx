@@ -1,6 +1,26 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import axios from 'axios'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+
+const STORAGE_KEY_FROM = 'sms-simulator.from'
+const STORAGE_KEY_TO = 'sms-simulator.to'
+
+// localStorage throws in private-browsing modes, so fall back to the default.
+function loadStoredNumber(key, fallback) {
+    try {
+        return localStorage.getItem(key) ?? fallback
+    } catch {
+        return fallback
+    }
+}
+
+function storeNumber(key, value) {
+    try {
+        localStorage.setItem(key, value)
+    } catch {
+        // Persistence is a convenience; ignore quota/permission failures.
+    }
+}
 
 function initialsFromNumber(value) {
     const digits = String(value).replace(/\D/g, '')
@@ -9,11 +29,23 @@ function initialsFromNumber(value) {
 }
 
 export default function App() {
-    const [from, setFrom] = useState('+15551234567')
-    const [to, setTo] = useState('+15559876543')
+    const [from, setFrom] = useState(() =>
+        loadStoredNumber(STORAGE_KEY_FROM, '+15551234567')
+    )
+    const [to, setTo] = useState(() =>
+        loadStoredNumber(STORAGE_KEY_TO, '+15559876543')
+    )
     const [body, setBody] = useState('')
     const [messages, setMessages] = useState([])
     const [loading, setLoading] = useState(false) // new state for progress indicator
+
+    useEffect(() => {
+        storeNumber(STORAGE_KEY_FROM, from)
+    }, [from])
+
+    useEffect(() => {
+        storeNumber(STORAGE_KEY_TO, to)
+    }, [to])
 
     async function sendMessage() {
         if (!body.trim()) return
@@ -31,10 +63,10 @@ export default function App() {
         try {
             const res = await axios.post(
                 `${API_BASE_URL}/webhook/inbound`,
-                JSON.stringify(payload),
+                payload,
                 {
                     headers: {
-                        'Content-Type': 'text/plain'
+                        'Content-Type': 'application/json'
                     },
                     responseType: 'text'
                 }
