@@ -153,6 +153,12 @@ Publishing the other app to `127.0.0.1` is not enough on its own: the nginx
 container cannot reach the host's loopback interface, so it must share a Docker
 network instead.
 
+If that app has files nginx should serve directly rather than proxy (large
+media, for instance), set `LOCAL_STATIC_DIR` to its asset directory; it is
+mounted read-only at `/srv/local`. Point it at that app's own directory rather
+than a parent that also contains this checkout, so the proxy is never in a
+position to serve your `.env`.
+
 If that application already has certificates issued with certbot's nginx
 plugin, switch its renewal to webroot, since the host nginx that plugin drives
 is no longer running:
