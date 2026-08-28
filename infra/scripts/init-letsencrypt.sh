@@ -83,22 +83,27 @@ sleep 5
 
 echo "==> Requesting certificates"
 for domain in "${DOMAINS[@]}"; do
-    if [ -f "$LETSENCRYPT_DIR/live/$domain/.textroute-real" ]; then
-        echo "    $domain already issued, skipping"
+    # A renewal config is what makes a certificate certbot's own. Its presence
+    # means this domain is already managed, so leave it alone -- that is what
+    # keeps this script from disturbing certificates belonging to other
+    # applications on the same host.
+    if [ -f "$LETSENCRYPT_DIR/renewal/$domain.conf" ]; then
+        echo "    $domain is already managed by certbot, skipping"
         continue
     fi
 
-    # --force-renewal replaces the placeholder, which certbot would otherwise
-    # consider a valid existing certificate and decline to touch.
+    # Whatever is here is our placeholder, and certbot refuses to write into a
+    # live directory it did not create. nginx has already loaded the old files
+    # into memory, so removing them now does not interrupt it.
+    rm -rf "$LETSENCRYPT_DIR/live/$domain" "$LETSENCRYPT_DIR/archive/$domain"
+
     $COMPOSE run --rm --entrypoint certbot certbot \
         certonly --webroot -w /var/www/certbot \
         $STAGING_ARG \
         --email "$LETSENCRYPT_EMAIL" \
         --agree-tos --no-eff-email \
-        --force-renewal \
         -d "$domain"
 
-    touch "$LETSENCRYPT_DIR/live/$domain/.textroute-real"
     echo "    issued for $domain"
 done
 
