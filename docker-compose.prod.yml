@@ -1,25 +1,72 @@
+# Production stack. Self-contained: nginx is the only service that touches the
+# host network, everything else stays on Docker networks.
+#
+#   docker compose -f docker-compose.prod.yml --profile build run --rm <builder>
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# All domains and secrets come from .env; see .env.example and DEPLOY.md.
+
 services:
   # ----------------------------
-  # Nginx reverse proxy
-  # Public entry point
+  # Nginx reverse proxy and static file server
+  # The public entry point, and the only service publishing ports
   # ----------------------------
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      # Substituted into infra/nginx/templates at container start. The filter
+      # is essential: without it envsubst would also blank out nginx's own
+      # runtime variables such as $$host and $$remote_addr.
+      NGINX_ENVSUBST_FILTER: "^(API_DOMAIN|MODERATOR_DOMAIN|DOCS_DOMAIN|SIMULATOR_DOMAIN|WEBHOOK_SECRET)$$"
+      API_DOMAIN: ${API_DOMAIN}
+      MODERATOR_DOMAIN: ${MODERATOR_DOMAIN}
+      DOCS_DOMAIN: ${DOCS_DOMAIN}
+      SIMULATOR_DOMAIN: ${SIMULATOR_DOMAIN}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
     volumes:
-      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./infra/nginx/certs:/etc/nginx/certs:ro
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/templates:/etc/nginx/templates:ro
+      # Suppress the image's stock welcome-page vhost; 00-default replaces it.
+      - /dev/null:/etc/nginx/conf.d/default.conf:ro
+      - ./infra/nginx/snippets:/etc/nginx/snippets:ro
+      # Vhosts specific to this server (other apps sharing the box).
+      - ./infra/nginx/local.d:/etc/nginx/local.d:ro
+      - ./infra/nginx/secrets:/etc/nginx/secrets:ro
+      - ${LETSENCRYPT_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot:ro
+      - moderator_web_dist:/srv/moderator-web:ro
+      - sms_simulator_dist:/srv/sms-simulator:ro
+      - mkdocs_site:/srv/docs:ro
     depends_on:
       - textroute
-      - mkdocs
     networks:
       - web
     restart: unless-stopped
 
   # ----------------------------
+  # Certificate renewal
+  # Runs certbot on a loop; nginx reloads periodically to pick up new certs.
+  # Initial issuance is handled by infra/scripts/init-letsencrypt.sh.
+  # ----------------------------
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - ${LETSENCRYPT_DIR:-/etc/letsencrypt}:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+    restart: unless-stopped
+
+  # ----------------------------
   # TextRoute FastAPI application
+  # Reachable only through nginx
   # ----------------------------
   textroute:
     build:
@@ -32,7 +79,10 @@ services:
         "--host",
         "0.0.0.0",
         "--port",
-        "6060"
+        "6060",
+        "--proxy-headers",
+        "--forwarded-allow-ips",
+        "*"
       ]
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-${DATABASE_URL}}
@@ -43,7 +93,10 @@ services:
       AUTH_EXPOSE_DEVELOPMENT_CODE: "false"
       AUTH_COOKIE_SECURE: "true"
       AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-textroute_session}
-      MODERATOR_WEB_ORIGIN: ${MODERATOR_WEB_ORIGIN}
+      # Without this the inbound webhook refuses every request.
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      MODERATOR_WEB_ORIGIN: https://${MODERATOR_DOMAIN}
+      CORS_ALLOWED_ORIGINS: https://${MODERATOR_DOMAIN}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       SMS_PROVIDER: ${SMS_PROVIDER:-logging}
       SMS_PROVIDER_URL: ${SMS_PROVIDER_URL:-}
@@ -56,19 +109,8 @@ services:
     restart: unless-stopped
 
   # ----------------------------
-  # MkDocs documentation
-  # Public through Nginx:
-  # https://textroute-docs.1000texts.com
-  # ----------------------------
-  mkdocs:
-    build:
-      context: ./docs/mkdocs
-    networks:
-      - web
-    restart: unless-stopped
-
-  # ----------------------------
   # PostgreSQL + pgvector
+  # No published port; reachable only from the API over the internal network
   # ----------------------------
   postgres:
     image: pgvector/pgvector:pg17
@@ -78,6 +120,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs only when the volume is empty, i.e. on first start. Later schema
+      # changes need migrations applied to the live database.
       - ./infra/postgres/initdb:/docker-entrypoint-initdb.d:ro
     networks:
       - internal
@@ -88,10 +132,51 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ----------------------------
+  # Static site builders
+  # One-shot tasks, not services. Each writes its build output into the volume
+  # nginx serves:
+  #   docker compose -f docker-compose.prod.yml --profile build run --rm <name>
+  # ----------------------------
+  moderator-web-build:
+    profiles: ["build"]
+    build:
+      context: ./moderator-web
+      target: build
+      args:
+        VITE_API_BASE_URL: https://${API_DOMAIN}
+    volumes:
+      - moderator_web_dist:/out
+
+  sms-simulator-build:
+    profiles: ["build"]
+    build:
+      context: ./tools/sms-simulator
+      target: build
+      args:
+        # Same-origin: the simulator vhost proxies /api and adds the webhook
+        # secret, keeping it out of the browser bundle.
+        VITE_API_BASE_URL: /api
+    volumes:
+      - sms_simulator_dist:/out
+
+  mkdocs-build:
+    profiles: ["build"]
+    build:
+      context: ./docs/mkdocs
+      target: build
+    volumes:
+      - mkdocs_site:/out
+
 volumes:
   postgres_data:
+  certbot_webroot:
+  moderator_web_dist:
+  sms_simulator_dist:
+  mkdocs_site:
 
 networks:
   web:
+    name: ${EDGE_NETWORK_NAME:-textroute_web}
   internal:
     internal: true

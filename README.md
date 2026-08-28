@@ -4,7 +4,7 @@ Route group messages to the people they are relevant to, using plain text only. 
 
 AI infers intent and context; a human moderator still decides who receives the message.
 
-**License:** [MIT](LICENSE) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Security:** [SECURITY.md](SECURITY.md)
+**License:** [MIT](LICENSE) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Security:** [SECURITY.md](SECURITY.md) · **Deploying:** [DEPLOY.md](DEPLOY.md)
 
 ## Layout
 
@@ -23,10 +23,10 @@ AI infers intent and context; a human moderator still decides who receives the m
 ├── docs/mkdocs/                # product documentation site
 ├── infra/
 │   ├── postgres/initdb/        # numbered SQL applied on first Postgres boot
-│   ├── nginx/
-│   └── scripts/                # dev-up / dev-down helpers
-├── docker-compose.dev.yml
-└── docker-compose.prod.yml
+│   ├── nginx/                  # edge proxy: vhost templates + shared snippets
+│   └── scripts/                # dev-up, deploy, TLS bootstrap, db backup
+├── docker-compose.dev.yml      # direct ports, no proxy
+└── docker-compose.prod.yml     # nginx + TLS; see DEPLOY.md
 ```
 
 ## Run locally
@@ -45,6 +45,8 @@ docker compose -f docker-compose.dev.yml up --build
 | Postgres | `localhost:5432` |
 
 Schema scripts in `infra/postgres/initdb/` run only when the Postgres volume is first created. Reset with `docker compose -f docker-compose.dev.yml down -v`.
+
+The inbound webhook requires an `X-Webhook-Secret` header matching `WEBHOOK_SECRET`; the dev stack defaults both sides to `dev-webhook-secret`, so the simulator works out of the box.
 
 ## Develop the API
 

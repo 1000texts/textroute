@@ -1,0 +1,39 @@
+# Moderator web UI: static build served straight from disk.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${MODERATOR_DOMAIN};
+
+    include /etc/nginx/snippets/acme-challenge.conf;
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${MODERATOR_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${MODERATOR_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${MODERATOR_DOMAIN}/privkey.pem;
+    include /etc/nginx/snippets/tls.conf;
+
+    root /srv/moderator-web;
+    index index.html;
+
+    # Hashed asset filenames are safe to cache indefinitely.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # Single-page app: unknown paths are client-side routes, not 404s.
+    location / {
+        try_files $uri /index.html;
+    }
+}

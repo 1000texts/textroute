@@ -247,4 +247,10 @@ docker-compose.yml
 infra/postgres/data/
 infra/postgres/pgvector/
 infra/nginx/certs/
+# Rendered from infra/nginx/templates at container start.
 infra/nginx/conf.d/
+# Vhosts and credentials specific to one server, never committed.
+infra/nginx/local.d/*
+!infra/nginx/local.d/.gitkeep
+infra/nginx/secrets/*
+!infra/nginx/secrets/.gitkeep

@@ -1,0 +1,19 @@
+# Catch-all for requests whose Host matches no vhost, which on a public IP means
+# scanners and probes. Without an explicit default_server the first vhost loaded
+# would inherit that role and answer for hostnames it knows nothing about.
+#
+# The ACME location stays reachable so a certificate can be issued for a domain
+# before its own vhost is serving.
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    include /etc/nginx/snippets/acme-challenge.conf;
+
+    # Close the connection without a response.
+    location / {
+        return 444;
+    }
+}
