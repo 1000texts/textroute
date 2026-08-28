@@ -15,11 +15,32 @@ export type GroupResponse = {
   phone_number: string;
 };
 
+export type GroupSettings = {
+  id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  routing_policy: string;
+};
+
 export function createGroup(
   payload: CreateGroupPayload,
 ): Promise<GroupResponse> {
   return apiRequest("/groups", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function getGroupSettings(): Promise<GroupSettings> {
+  return apiRequest("/group/settings");
+}
+
+export function updateRoutingPolicy(
+  routingPolicy: string,
+): Promise<GroupSettings> {
+  return apiRequest("/group/settings", {
+    method: "PATCH",
+    body: JSON.stringify({ routing_policy: routingPolicy }),
   });
 }

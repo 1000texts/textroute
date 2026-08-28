@@ -137,8 +137,7 @@ export function AddMember() {
             onChange={(event) => setConsentConfirmed(event.target.checked)}
           />
           <span>
-            I have received consent from the above individuals to include them
-            in my texting group.
+          I confirm that I have received consent from each person listed above to include their phone number in this texting group and send them group messages.
           </span>
         </label>
 

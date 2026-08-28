@@ -10,8 +10,10 @@ import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { SessionProvider, useSession } from "./auth/SessionContext";
 import { AddMember } from "./pages/AddMember";
 import { CreateGroup } from "./pages/CreateGroup";
+import { GroupSettings } from "./pages/GroupSettings";
 import { Login } from "./pages/Login";
-import { ReviewQueue } from "./pages/ReviewQueue";
+import { Members } from "./pages/Members";
+import { Messages } from "./pages/Messages";
 import "./index.css";
 
 function AppRoutes() {
@@ -35,9 +37,17 @@ function AppRoutes() {
               className={({ isActive }) =>
                 isActive ? "nav-link active" : "nav-link"
               }
-              to="/review"
+              to="/messages"
             >
-              Review
+              Messages
+            </NavLink>
+            <NavLink
+              className={({ isActive }) =>
+                isActive ? "nav-link active" : "nav-link"
+              }
+              to="/members"
+            >
+              Members
             </NavLink>
             <NavLink
               className={({ isActive }) =>
@@ -46,6 +56,14 @@ function AppRoutes() {
               to="/add-member"
             >
               Add members
+            </NavLink>
+            <NavLink
+              className={({ isActive }) =>
+                isActive ? "nav-link active" : "nav-link"
+              }
+              to="/settings"
+            >
+              Settings
             </NavLink>
             <button
               type="button"
@@ -73,10 +91,28 @@ function AppRoutes() {
         <Route path="/" element={<CreateGroup />} />
         <Route path="/login" element={<Login />} />
         <Route
-          path="/review"
+          path="/messages"
           element={
             <ProtectedRoute>
-              <ReviewQueue />
+              <Messages />
+            </ProtectedRoute>
+          }
+        />
+        {/* The review queue is now a tab inside Messages. */}
+        <Route path="/review" element={<Navigate to="/messages" replace />} />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <GroupSettings />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/members"
+          element={
+            <ProtectedRoute>
+              <Members />
             </ProtectedRoute>
           }
         />
