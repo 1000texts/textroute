@@ -49,7 +49,12 @@ Create the simulator's Basic auth credentials:
 ```bash
 docker run --rm httpd:alpine htpasswd -nb <user> '<password>' \
   | sudo tee infra/nginx/secrets/simulator.htpasswd
+sudo chmod 644 infra/nginx/secrets/simulator.htpasswd
 ```
+
+The file holds a hash rather than the password, and the nginx worker runs as an
+unprivileged user, so it must be world-readable; mode 600 makes every simulator
+request fail with a 500.
 
 Build the static sites, obtain certificates, and start:
 
@@ -189,3 +194,5 @@ docker compose -f docker-compose.prod.yml run --rm --entrypoint certbot certbot 
 | Login succeeds then immediately logs out | `AUTH_COOKIE_SECURE=true` without HTTPS, or UI and API not on sibling subdomains |
 | Webhook returns 401 | Missing or wrong `X-Webhook-Secret` |
 | Webhook returns 503 | `WEBHOOK_SECRET` is not set in `.env` |
+| Simulator returns 500 after you enter the password | `simulator.htpasswd` is not readable by the nginx worker; `chmod 644` |
+| nginx exits with "directive is duplicate" | A `local.d` vhost sets a timeout the shared proxy snippet already set |
