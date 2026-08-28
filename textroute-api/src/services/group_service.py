@@ -7,10 +7,15 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from src.core.group_manager import GroupManager
-from src.core.membership_manager import MembershipManager
-from src.core.phone_number_manager import PhoneNumberManager
+from src.core.managers.group_manager import GroupManager
+from src.core.managers.membership_manager import MembershipManager
+from src.core.managers.phone_number_manager import PhoneNumberManager
+from src.domain.routing_policy import IMPLEMENTED_POLICIES
 from src.models import Group
+
+
+class UnsupportedRoutingPolicyError(Exception):
+    """A recognized-but-unimplemented or unknown routing policy was requested."""
 
 
 class GroupService:
@@ -68,6 +73,47 @@ class GroupService:
             "status": group.status,
             "moderator_member_id": str(moderator.id),
             "phone_number": phone_number.phone_number,
+        }
+
+    def get_settings(self, db: Session, group_id: UUID) -> dict:
+        group = self.group_manager.get_group(db, group_id)
+        if group is None:
+            raise LookupError("Group not found.")
+        return self._settings(group)
+
+    def set_routing_policy(
+        self,
+        db: Session,
+        group_id: UUID,
+        *,
+        routing_policy: str,
+    ) -> dict:
+        """Change how new requests from this group are routed.
+
+        Rejects policies the router cannot honor yet, rather than silently
+        accepting a value that would fall back to moderation at runtime.
+        """
+        if routing_policy not in {p.value for p in IMPLEMENTED_POLICIES}:
+            raise UnsupportedRoutingPolicyError(
+                f"Routing policy {routing_policy!r} is not implemented."
+            )
+
+        group = self.group_manager.get_group(db, group_id)
+        if group is None:
+            raise LookupError("Group not found.")
+
+        group.routing_policy = routing_policy
+        db.add(group)
+        db.commit()
+        return self._settings(group)
+
+    def _settings(self, group: Group) -> dict:
+        return {
+            "id": str(group.id),
+            "name": group.name,
+            "description": group.description,
+            "status": group.status,
+            "routing_policy": group.routing_policy,
         }
 
     def list_members(self, db: Session, group_id: UUID) -> list[dict]:

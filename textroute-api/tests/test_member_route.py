@@ -4,7 +4,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from src.api.dependencies import get_moderator_context
-from src.api.routes import member as member_route
+from src.api.routes.moderator import members as member_route
 from src.config.config import Config
 from src.db.db import get_db
 from src.main import app

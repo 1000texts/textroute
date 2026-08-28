@@ -1,13 +1,14 @@
 """Unit tests for moderation approve / reject / fan-out."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 from uuid import uuid4
 
 import pytest
 
-from src.core.sms_provider import LoggingSmsProvider, SmsProviderError
+from src.core.providers.sms_provider import LoggingSmsProvider, SmsProviderError
 from src.domain.message_status import MessageWorkflowStatus
+from src.services.group_service import GroupService
 from src.services.messaging_service import MessagingService
 from src.services.moderation_service import (
     InvalidModerationStateError,
@@ -97,7 +98,8 @@ def test_messaging_service_unexpected_errors_are_not_wrapped():
     message_mgr.create_outbound.assert_not_called()
 
 
-def test_approve_fans_out_original_body():
+def test_approve_records_moderator_decision_then_delegates_fanout():
+    """Approval is the moderator's act; delivery belongs to RoutingService."""
     db = MagicMock()
     message_id = uuid4()
     group_id = uuid4()
@@ -112,7 +114,9 @@ def test_approve_fans_out_original_body():
         workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
         group=SimpleNamespace(id=group_id),
         suggested_recipient_ids=[recipient_id],
-        approved_recipient_ids=None,
+        routed_recipient_ids=None,
+        kind="new_request",
+        routing_policy="moderator_required",
         intent="request_borrow",
         confidence=0.4,
         constraints={"object": "pressure washer"},
@@ -125,19 +129,12 @@ def test_approve_fans_out_original_body():
     message_mgr = MagicMock()
     message_mgr.find_by_id.return_value = message
 
-    def apply_approval(db, msg, *, approved_recipient_ids, workflow_status):
-        msg.approved_recipient_ids = approved_recipient_ids
+    def apply_approval(db, msg, *, routed_recipient_ids, workflow_status):
+        msg.routed_recipient_ids = routed_recipient_ids
         msg.workflow_status = workflow_status
         return msg
 
-    def set_status(db, msg, status, processing_notes=None):
-        msg.workflow_status = status
-        if processing_notes is not None:
-            msg.processing_notes = processing_notes
-        return msg
-
     message_mgr.apply_approval.side_effect = apply_approval
-    message_mgr.set_workflow_status.side_effect = set_status
 
     membership_mgr = MagicMock()
     membership_mgr.get_active_membership.return_value = SimpleNamespace(
@@ -146,20 +143,18 @@ def test_approve_fans_out_original_body():
     )
     membership_mgr.get_membership.return_value = None
 
-    phone_mgr = MagicMock()
-    phone_mgr.list_for_group.return_value = [
-        SimpleNamespace(status="assigned", phone_number="+15559876543")
-    ]
-
-    messaging = MagicMock()
-    outbound = SimpleNamespace(id=uuid4())
-    messaging.send_message.return_value = outbound
+    outbound_id = str(uuid4())
+    routing = MagicMock()
+    routing.fan_out.return_value = {
+        "delivered_outbound_ids": [outbound_id],
+        "delivery_failures": [],
+    }
 
     service = ModerationService(
         message_manager=message_mgr,
         membership_manager=membership_mgr,
-        phone_number_manager=phone_mgr,
-        messaging_service=messaging,
+        phone_number_manager=MagicMock(),
+        routing_service=routing,
     )
 
     result = service.approve(
@@ -169,108 +164,14 @@ def test_approve_fans_out_original_body():
         recipient_ids=[recipient_id],
     )
 
-    messaging.send_message.assert_called_once()
-    call_kwargs = messaging.send_message.call_args.kwargs
-    assert call_kwargs["body"] == message.body
-    assert call_kwargs["parent_message_id"] == message_id
-    assert result["workflow_status"] == MessageWorkflowStatus.DELIVERED.value
-    assert result["delivered_outbound_ids"] == [str(outbound.id)]
+    # Moderator approval is recorded as APPROVED, never auto_authorized.
+    assert message.workflow_status == MessageWorkflowStatus.APPROVED.value
+    assert message.routed_recipient_ids == [recipient_id]
 
-
-def test_approve_partial_fanout_sets_partially_delivered():
-    db = MagicMock()
-    message_id = uuid4()
-    group_id = uuid4()
-    sender_id = uuid4()
-    recipient_a = uuid4()
-    recipient_b = uuid4()
-
-    message = SimpleNamespace(
-        id=message_id,
-        group_id=group_id,
-        member_id=sender_id,
-        body="Need a ladder",
-        workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
-        group=SimpleNamespace(id=group_id),
-        suggested_recipient_ids=[recipient_a, recipient_b],
-        approved_recipient_ids=None,
-        intent="request_borrow",
-        confidence=0.4,
-        constraints={"object": "ladder"},
-        parent_message_id=None,
-        created_at=None,
-        processing_notes=None,
-    )
-    members = {
-        recipient_a: SimpleNamespace(
-            id=recipient_a, phone_number="+15552222222", name="A"
-        ),
-        recipient_b: SimpleNamespace(
-            id=recipient_b, phone_number="+15553333333", name="B"
-        ),
-    }
-
-    message_mgr = MagicMock()
-    message_mgr.find_by_id.return_value = message
-
-    def apply_approval(db, msg, *, approved_recipient_ids, workflow_status):
-        msg.approved_recipient_ids = approved_recipient_ids
-        msg.workflow_status = workflow_status
-        return msg
-
-    def set_status(db, msg, status, processing_notes=None):
-        msg.workflow_status = status
-        if processing_notes is not None:
-            msg.processing_notes = processing_notes
-        return msg
-
-    message_mgr.apply_approval.side_effect = apply_approval
-    message_mgr.set_workflow_status.side_effect = set_status
-
-    membership_mgr = MagicMock()
-
-    def get_active_membership(db, member_id, group_id):
-        member = members[member_id]
-        return SimpleNamespace(member=member, member_id=member_id)
-
-    membership_mgr.get_active_membership.side_effect = get_active_membership
-    membership_mgr.get_membership.return_value = None
-
-    phone_mgr = MagicMock()
-    phone_mgr.list_for_group.return_value = [
-        SimpleNamespace(status="assigned", phone_number="+15559876543")
-    ]
-
-    messaging = MagicMock()
-    outbound = SimpleNamespace(id=uuid4())
-
-    def send_message(db, **kwargs):
-        if kwargs["to_member"].id == recipient_b:
-            raise SmsProviderError("provider down")
-        return outbound
-
-    messaging.send_message.side_effect = send_message
-
-    service = ModerationService(
-        message_manager=message_mgr,
-        membership_manager=membership_mgr,
-        phone_number_manager=phone_mgr,
-        messaging_service=messaging,
-    )
-
-    result = service.approve(
-        db,
-        message_id,
-        group_id=group_id,
-        recipient_ids=[recipient_a, recipient_b],
-    )
-
-    assert (
-        result["workflow_status"]
-        == MessageWorkflowStatus.PARTIALLY_DELIVERED.value
-    )
-    assert result["delivered_outbound_ids"] == [str(outbound.id)]
-    assert len(result["delivery_failures"]) == 1
+    routing.fan_out.assert_called_once()
+    assert routing.fan_out.call_args.args[2] == [recipient]
+    assert result["delivered_outbound_ids"] == [outbound_id]
+    assert "routed_recipients" in result
 
 
 def test_approve_rejects_empty_recipients():
@@ -326,7 +227,9 @@ def test_reject_message():
         confidence=None,
         constraints=None,
         suggested_recipient_ids=[],
-        approved_recipient_ids=None,
+        routed_recipient_ids=None,
+        kind="new_request",
+        routing_policy="moderator_required",
         parent_message_id=None,
         created_at=None,
         processing_notes=None,
@@ -356,3 +259,117 @@ def test_cross_group_message_is_not_visible():
 
     with pytest.raises(MessageNotFoundError, match="Message not found"):
         service.get_message(db, message.id, group_id=uuid4())
+
+
+def test_queue_asks_only_for_awaiting_moderator():
+    """The review queue is the source of truth for the needs-review count."""
+    db = MagicMock()
+    message_mgr = MagicMock()
+    message_mgr.list_inbound_for_group.return_value = []
+    ModerationService(message_manager=message_mgr).list_queue(db, uuid4())
+
+    assert message_mgr.list_inbound_for_group.call_args.kwargs["statuses"] == [
+        MessageWorkflowStatus.AWAITING_MODERATOR.value
+    ]
+
+
+def test_policy_change_writes_only_the_group_row():
+    """Switching a group to auto_group must not rewrite pending messages.
+
+    The per-message routing_policy snapshot exists precisely so history stays
+    truthful; a message queued under moderator_required keeps waiting for a
+    human even after the group flips to automatic.
+    """
+    db = MagicMock()
+    group = SimpleNamespace(
+        id=uuid4(),
+        name="Neighbors",
+        description=None,
+        status="active",
+        routing_policy="moderator_required",
+    )
+    group_mgr = MagicMock()
+    group_mgr.get_group.return_value = group
+
+    GroupService(group_manager=group_mgr).set_routing_policy(
+        db, group.id, routing_policy="auto_group"
+    )
+
+    assert group.routing_policy == "auto_group"
+    # Only the group row was written — no message rows were touched.
+    assert db.add.call_args_list == [call(group)]
+    db.query.assert_not_called()
+
+
+def test_approve_ignores_the_groups_current_policy():
+    """A pending message is approved on its own snapshot, not today's setting."""
+    db = MagicMock()
+    message_id = uuid4()
+    group_id = uuid4()
+    recipient_id = uuid4()
+    recipient = SimpleNamespace(id=recipient_id, phone_number="+15552222222", name="A")
+
+    message = SimpleNamespace(
+        id=message_id,
+        group_id=group_id,
+        member_id=uuid4(),
+        body="Does anyone have an axe?",
+        workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
+        # Group has since moved to auto_group; this snapshot must still govern.
+        routing_policy="moderator_required",
+        kind="new_request",
+        group=SimpleNamespace(id=group_id, routing_policy="auto_group"),
+        suggested_recipient_ids=[recipient_id],
+        routed_recipient_ids=None,
+        intent=None,
+        confidence=None,
+        constraints=None,
+        parent_message_id=None,
+        created_at=None,
+        processing_notes=None,
+    )
+
+    message_mgr = MagicMock()
+    message_mgr.find_by_id.return_value = message
+
+    def apply_approval(db, msg, *, routed_recipient_ids, workflow_status):
+        msg.routed_recipient_ids = routed_recipient_ids
+        msg.workflow_status = workflow_status
+        return msg
+
+    message_mgr.apply_approval.side_effect = apply_approval
+
+    membership_mgr = MagicMock()
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(
+        member=recipient, member_id=recipient_id
+    )
+    membership_mgr.get_membership.return_value = None
+
+    routing = MagicMock()
+    routing.fan_out.return_value = {
+        "delivered_outbound_ids": [str(uuid4())],
+        "delivery_failures": [],
+    }
+
+    ModerationService(
+        message_manager=message_mgr,
+        membership_manager=membership_mgr,
+        phone_number_manager=MagicMock(),
+        routing_service=routing,
+    ).approve(db, message_id, group_id=group_id, recipient_ids=[recipient_id])
+
+    # Moderator approval, not auto-authorization, despite the group's new policy.
+    assert message.workflow_status == MessageWorkflowStatus.APPROVED.value
+    assert message.routing_policy == "moderator_required"
+    message_mgr.apply_routing_authorization.assert_not_called()
+
+
+def test_list_messages_does_not_filter_by_status():
+    """The message list is a feed, not a queue: every workflow state belongs."""
+    db = MagicMock()
+    message_mgr = MagicMock()
+    message_mgr.list_inbound_for_group.return_value = []
+    ModerationService(message_manager=message_mgr).list_messages(db, uuid4())
+
+    kwargs = message_mgr.list_inbound_for_group.call_args.kwargs
+    assert "statuses" not in kwargs or kwargs["statuses"] is None

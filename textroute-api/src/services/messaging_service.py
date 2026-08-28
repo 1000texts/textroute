@@ -8,8 +8,12 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from src.core.message_manager import MessageManager
-from src.core.sms_provider import SmsProvider, SmsProviderError, get_sms_provider
+from src.core.managers.message_manager import MessageManager
+from src.core.providers.sms_provider import (
+    SmsProvider,
+    SmsProviderError,
+    get_sms_provider,
+)
 from src.domain.message_status import MessageWorkflowStatus
 from src.models import Group, Member, Message
 

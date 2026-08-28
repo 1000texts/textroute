@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.core.sms_provider import SmsProviderError
+from src.core.providers.sms_provider import SmsProviderError
 from src.services.auth_errors import (
     InvalidLoginChallengeError,
     InvalidModeratorCredentialsError,

@@ -10,7 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from src.core.membership_manager import MembershipManager
+from src.core.managers.membership_manager import MembershipManager
 from src.core.phone_normalize import normalize_phone_number
 
 
@@ -107,6 +107,11 @@ class MemberService:
                 ),
                 "role": membership.role,
                 "status": membership.status,
+                "joined_at": (
+                    membership.joined_at.isoformat()
+                    if membership.joined_at is not None
+                    else None
+                ),
             }
             for membership in memberships
             if membership.member is not None

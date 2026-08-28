@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.core.membership_manager import MembershipManager
+from src.core.managers.membership_manager import MembershipManager
 from src.services.member_service import (
     DuplicateMemberPhoneError,
     MemberEnrollment,

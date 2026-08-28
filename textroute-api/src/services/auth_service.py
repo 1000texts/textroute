@@ -16,10 +16,10 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from src.config.config import Config
-from src.core.auth_manager import AuthManager
-from src.core.membership_manager import MembershipManager
-from src.core.phone_number_manager import PhoneNumberManager
-from src.core.sms_provider import (
+from src.core.managers.auth_manager import AuthManager
+from src.core.managers.membership_manager import MembershipManager
+from src.core.managers.phone_number_manager import PhoneNumberManager
+from src.core.providers.sms_provider import (
     SmsProvider,
     SmsProviderError,
     get_sms_provider,
@@ -77,7 +77,12 @@ class VerificationResult:
 
 
 class ModeratorAuthService:
-    """Challenge + session lifecycle. Owns commits for auth writes."""
+    """Challenge + session lifecycle. Owns commits for auth writes.
+
+    ``AuthManager`` only flushes. A successful verify is one transaction:
+    consume challenge → create session → ``commit``. That avoids a consumed
+    challenge with no usable session if session insert fails mid-way.
+    """
 
     def __init__(
         self,
@@ -173,7 +178,12 @@ class ModeratorAuthService:
         challenge_id: UUID,
         code: str,
     ) -> VerificationResult:
-        """Consume challenge and return a raw session token (cookie value only)."""
+        """Validate code; on success consume challenge + create session atomically.
+
+        Wrong-code attempts commit only the incremented ``attempt_count`` (challenge
+        stays reusable until max attempts / expiry). Success path does not commit
+        until both consume and session insert have flushed.
+        """
         challenge = self.auth_manager.get_challenge_for_update(db, challenge_id)
         now = self._now()
         if (
@@ -193,6 +203,7 @@ class ModeratorAuthService:
             db.commit()
             raise InvalidLoginChallengeError("Invalid or expired confirmation code.")
 
+        # Single unit of work: consume + session (then one commit below).
         challenge.consumed_at = now
         token = secrets.token_urlsafe(32)
         expires_at = now + timedelta(seconds=self.settings.session_ttl_seconds)

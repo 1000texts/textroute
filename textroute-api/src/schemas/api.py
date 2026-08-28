@@ -32,6 +32,13 @@ class ApproveMessageRequest(BaseModel):
     recipient_ids: list[UUID]
 
 
+class UpdateRoutingPolicyRequest(BaseModel):
+    """Unimplemented values are rejected by the service, not by this schema, so
+    the error message can explain *why* rather than just listing valid strings."""
+
+    routing_policy: str
+
+
 class RequestModeratorChallenge(BaseModel):
     group_phone_number: str
     moderator_phone_number: str

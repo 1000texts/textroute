@@ -7,7 +7,11 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.core.message_processor import MemberContext, MessageProcessor, ProcessingResult
+from src.core.processors.message_processor import (
+    MemberContext,
+    MessageProcessor,
+    ProcessingResult,
+)
 from src.core.phone_normalize import InvalidPhoneNumberError, normalize_phone_number
 from src.domain.message_status import MessageWorkflowStatus
 from src.services.inbound_errors import (
@@ -26,12 +30,14 @@ def _service(
     membership_manager=None,
     message_manager=None,
     message_processor=None,
+    routing_service=None,
 ) -> InboundMessageService:
     return InboundMessageService(
         phone_number_manager=phone_number_manager or MagicMock(),
         membership_manager=membership_manager or MagicMock(),
         message_manager=message_manager or MagicMock(),
         message_processor=message_processor or MagicMock(),
+        routing_service=routing_service or MagicMock(),
     )
 
 
@@ -79,7 +85,7 @@ def test_successful_inbound_message_awaits_moderator():
         phone_number="+15559876543",
         group_id=group_id,
         status="assigned",
-        group=SimpleNamespace(id=group_id),
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
     member = SimpleNamespace(id=member_id, phone_number="+15551234567")
     membership = SimpleNamespace(id=uuid4())
@@ -111,7 +117,7 @@ def test_successful_inbound_message_awaits_moderator():
 
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    message_mgr.find_recent_fanout_to_member.return_value = None
+    message_mgr.find_original_request_candidate_for_member.return_value = None
     message_mgr.create_inbound.return_value = message
 
     processor = MagicMock()
@@ -217,7 +223,7 @@ def test_sender_not_in_group():
         phone_number="+15559876543",
         group_id=group_id,
         status="assigned",
-        group=SimpleNamespace(id=group_id),
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
     membership_mgr = MagicMock()
     membership_mgr.get_by_phone.return_value = SimpleNamespace(
@@ -271,7 +277,7 @@ def test_concurrent_duplicate_provider_message():
         phone_number="+15559876543",
         group_id=group_id,
         status="assigned",
-        group=SimpleNamespace(id=group_id),
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
 
     membership_mgr = MagicMock()
@@ -322,7 +328,7 @@ def test_unrelated_integrity_error_is_not_reported_as_duplicate():
         phone_number="+15559876543",
         group_id=group_id,
         status="assigned",
-        group=SimpleNamespace(id=group_id),
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
 
     membership_mgr = MagicMock()
@@ -370,7 +376,7 @@ def test_processor_failure_marks_processing_failed():
         phone_number="+15559876543",
         group_id=group_id,
         status="assigned",
-        group=SimpleNamespace(id=group_id),
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
 
     membership_mgr = MagicMock()
@@ -383,7 +389,7 @@ def test_processor_failure_marks_processing_failed():
     message = SimpleNamespace(id=message_id, body="hello", member_id=uuid4())
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    message_mgr.find_recent_fanout_to_member.return_value = None
+    message_mgr.find_original_request_candidate_for_member.return_value = None
     message_mgr.create_inbound.return_value = message
     message_mgr.find_by_id.return_value = message
 
@@ -425,7 +431,7 @@ def test_reply_to_fanout_is_persisted_without_processing():
         phone_number="+15559876543",
         group_id=group_id,
         status="assigned",
-        group=SimpleNamespace(id=group_id),
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
     membership_mgr = MagicMock()
     membership_mgr.get_by_phone.return_value = SimpleNamespace(
@@ -435,13 +441,15 @@ def test_reply_to_fanout_is_persisted_without_processing():
 
     message = SimpleNamespace(
         id=message_id,
+        parent_message_id=parent_id,
         workflow_status=MessageWorkflowStatus.RECEIVED.value,
     )
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    message_mgr.find_recent_fanout_to_member.return_value = SimpleNamespace(
-        id=uuid4(),
-        parent_message_id=parent_id,
+    # The lookup yields the original request itself, so the new message parents
+    # directly to it rather than to a per-recipient fan-out copy.
+    message_mgr.find_original_request_candidate_for_member.return_value = (
+        SimpleNamespace(id=parent_id)
     )
     message_mgr.create_inbound.return_value = message
 
@@ -460,6 +468,231 @@ def test_reply_to_fanout_is_persisted_without_processing():
         body="Yeah, Saturday morning works.",
     )
 
-    assert result["processing"] == "reply_persisted"
+    assert result["kind"] == "reply"
+    assert result["processing"] == "possible_reply_persisted"
     assert result["parent_message_id"] == str(parent_id)
     processor.process.assert_not_called()
+    lookup = message_mgr.find_original_request_candidate_for_member
+    assert (
+        lookup.call_args.kwargs["within_hours"]
+        == InboundMessageService.ORIGINAL_REQUEST_CANDIDATE_WINDOW_HOURS
+    )
+    # The link points at the original request, not the fan-out copy.
+    assert message_mgr.create_inbound.call_args.kwargs["parent_message_id"] == parent_id
+
+
+# ---------------------------------------------------------------------------
+# Kind x policy: the central invariant. Kind selects the workflow; the group
+# routing policy applies to NEW_REQUEST only. A non-null parent_message_id is a
+# relationship, never a moderation decision.
+# ---------------------------------------------------------------------------
+
+
+def _routing_fixtures(*, routing_policy, original_request_candidate_id=None):
+    group_id = uuid4()
+    member_id = uuid4()
+    other_id = uuid4()
+
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id, routing_policy=routing_policy),
+    )
+
+    other = SimpleNamespace(id=other_id, phone_number="+15550001111", name="B")
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=member_id, phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(
+        id=uuid4(), member=other, member_id=other_id
+    )
+    membership_mgr.list_active_memberships.return_value = [
+        SimpleNamespace(member=other, role="member", member_id=other_id),
+    ]
+
+    message = SimpleNamespace(
+        id=uuid4(),
+        body="Does anyone have an axe I can borrow?",
+        member_id=member_id,
+        parent_message_id=original_request_candidate_id,
+        workflow_status=MessageWorkflowStatus.RECEIVED.value,
+    )
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.return_value = None
+    message_mgr.find_original_request_candidate_for_member.return_value = (
+        SimpleNamespace(id=original_request_candidate_id)
+        if original_request_candidate_id is not None
+        else None
+    )
+    message_mgr.create_inbound.return_value = message
+
+    processor = MagicMock()
+    processor.process.return_value = ProcessingResult(
+        intent="request_borrow",
+        suggested_recipient_ids=[other_id],
+        confidence=0.4,
+        notes="heuristic_v1_suggest_active_members",
+    )
+
+    routing = MagicMock()
+    routing.fan_out.return_value = {
+        "delivered_outbound_ids": [str(uuid4())],
+        "delivery_failures": [],
+    }
+    return phone_mgr, membership_mgr, message_mgr, processor, routing, other
+
+
+def test_new_request_under_auto_group_is_routed_automatically():
+    db = MagicMock()
+    phone_mgr, membership_mgr, message_mgr, processor, routing, other = (
+        _routing_fixtures(routing_policy="auto_group")
+    )
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        message_processor=processor,
+        routing_service=routing,
+    )
+
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="Does anyone have an axe I can borrow?",
+    )
+
+    routing.fan_out.assert_called_once()
+    assert routing.fan_out.call_args.args[2] == [other]
+    assert result["kind"] == "new_request"
+    assert result["routing_policy"] == "auto_group"
+    assert result["processing"] == "auto_group_authorized"
+    # Policy authorized routing; no moderator approved it.
+    message_mgr.apply_routing_authorization.assert_called_once()
+    message_mgr.apply_approval.assert_not_called()
+
+
+def test_reply_under_auto_group_is_never_broadcast():
+    """Bob's "I have one." must not be fanned out to the whole group."""
+    db = MagicMock()
+    phone_mgr, membership_mgr, message_mgr, processor, routing, _ = (
+        _routing_fixtures(
+            routing_policy="auto_group",
+            original_request_candidate_id=uuid4(),
+        )
+    )
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        message_processor=processor,
+        routing_service=routing,
+    )
+
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="I have one.",
+    )
+
+    routing.fan_out.assert_not_called()
+    processor.process.assert_not_called()
+    message_mgr.apply_routing_authorization.assert_not_called()
+    assert result["kind"] == "reply"
+    # Policy is not even consulted for replies, so no snapshot is recorded.
+    assert "routing_policy" not in result
+
+
+def test_reply_under_moderator_required_behaves_identically():
+    """Reply handling is a slice-level policy, not something the group policy controls."""
+    db = MagicMock()
+    phone_mgr, membership_mgr, message_mgr, processor, routing, _ = (
+        _routing_fixtures(
+            routing_policy="moderator_required",
+            original_request_candidate_id=uuid4(),
+        )
+    )
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        message_processor=processor,
+        routing_service=routing,
+    )
+
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="I have one.",
+    )
+
+    routing.fan_out.assert_not_called()
+    processor.process.assert_not_called()
+    assert result["kind"] == "reply"
+    assert result["processing"] == "possible_reply_persisted"
+
+
+def test_auto_matched_falls_back_to_moderation():
+    db = MagicMock()
+    phone_mgr, membership_mgr, message_mgr, processor, routing, _ = (
+        _routing_fixtures(routing_policy="auto_matched")
+    )
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        message_processor=processor,
+        routing_service=routing,
+    )
+
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="Does anyone have an axe?",
+    )
+
+    routing.fan_out.assert_not_called()
+    assert result["kind"] == "new_request"
+    # Snapshot still records what the group was set to at the time.
+    assert result["routing_policy"] == "auto_matched"
+
+
+def test_auto_group_with_no_eligible_recipients_skips_fanout():
+    db = MagicMock()
+    phone_mgr, membership_mgr, message_mgr, processor, routing, other = (
+        _routing_fixtures(routing_policy="auto_group")
+    )
+
+    # The sender is still an active member; the suggested recipient's membership
+    # lapsed between suggestion and send, leaving nobody to route to.
+    sender_membership = SimpleNamespace(id=uuid4())
+
+    def get_active_membership(db, member_id, group_id):
+        return None if member_id == other.id else sender_membership
+
+    membership_mgr.get_active_membership.side_effect = get_active_membership
+
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        message_processor=processor,
+        routing_service=routing,
+    )
+
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="Does anyone have an axe?",
+    )
+
+    routing.fan_out.assert_not_called()
+    assert result["processing"] == "auto_routing_skipped_no_recipients"

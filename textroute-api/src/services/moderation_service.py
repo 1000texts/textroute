@@ -11,13 +11,12 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from src.core.membership_manager import MembershipManager
-from src.core.message_manager import MessageManager
-from src.core.phone_number_manager import PhoneNumberManager
-from src.core.sms_provider import SmsProviderError
+from src.core.managers.membership_manager import MembershipManager
+from src.core.managers.message_manager import MessageManager
+from src.core.managers.phone_number_manager import PhoneNumberManager
 from src.domain.message_status import MessageWorkflowStatus
-from src.models import Group, Member, Message
-from src.services.messaging_service import MessagingService
+from src.models import Member, Message
+from src.services.routing_service import RoutingError, RoutingService
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +38,12 @@ class InvalidRecipientsError(ModerationError):
 
 
 class ModerationService:
-    """Human-in-the-loop: review suggestions, approve/reject, fan out.
+    """Human-in-the-loop: review suggestions, approve/reject.
 
-    Approve sends the *unchanged* inbound body to each chosen recipient.
-    Parent inbound ends ``delivered`` / ``partially_delivered`` /
-    ``delivery_failed``; each successful outbound copy is ``sent``.
+    New routing requests default to a group-wide suggested audience; the
+    moderator may narrow or expand recipients before send. Approve records the
+    moderator's decision, then delegates delivery to ``RoutingService`` — the
+    same fan-out used by policy-authorized routing.
     Per-recipient carrier receipts (``MessageDelivery``) are a follow-up.
     """
 
@@ -52,21 +52,46 @@ class ModerationService:
         message_manager: MessageManager | None = None,
         membership_manager: MembershipManager | None = None,
         phone_number_manager: PhoneNumberManager | None = None,
-        messaging_service: MessagingService | None = None,
+        routing_service: RoutingService | None = None,
     ):
         self.message_manager = message_manager or MessageManager()
         self.membership_manager = membership_manager or MembershipManager()
         self.phone_number_manager = phone_number_manager or PhoneNumberManager()
-        self.messaging_service = messaging_service or MessagingService(
-            self.message_manager
+        self.routing_service = routing_service or RoutingService(
+            message_manager=self.message_manager,
+            phone_number_manager=self.phone_number_manager,
         )
 
     def list_queue(self, db: Session, group_id: UUID) -> list[dict]:
-        """Messages in ``awaiting_moderator`` for one group."""
-        messages = self.message_manager.list_by_workflow_status(
+        """Messages in ``awaiting_moderator`` for one group.
+
+        The source of truth for the "needs review" count. Deliberately narrower
+        than ``list_messages``: policy-routed messages were never queued.
+        """
+        messages = self.message_manager.list_inbound_for_group(
             db,
             group_id=group_id,
             statuses=[MessageWorkflowStatus.AWAITING_MODERATOR.value],
+        )
+        return [self._message_summary(db, m) for m in messages]
+
+    def list_messages(
+        self,
+        db: Session,
+        group_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Every inbound message for the group, whatever its workflow state.
+
+        Feeds the moderator's general message list, which is not a moderation
+        queue: most rows need no action. A future ``MessageQueryService`` could
+        own this, but the summary helpers live here, so it stays for now.
+        """
+        messages = self.message_manager.list_inbound_for_group(
+            db,
+            group_id=group_id,
+            limit=limit,
         )
         return [self._message_summary(db, m) for m in messages]
 
@@ -125,78 +150,18 @@ class ModerationService:
         self.message_manager.apply_approval(
             db,
             message,
-            approved_recipient_ids=[m.id for m in recipients],
+            routed_recipient_ids=[m.id for m in recipients],
             workflow_status=MessageWorkflowStatus.APPROVED.value,
         )
         db.commit()
 
-        return self._deliver(db, message, recipients)
-
-    def _deliver(
-        self,
-        db: Session,
-        message: Message,
-        recipients: list[Member],
-    ) -> dict:
-        """Best-effort fan-out; continues after individual ``SmsProviderError``s."""
-        group = message.group
-        if group is None:
-            group = db.query(Group).filter(Group.id == message.group_id).one()
-
-        from_number = self._group_from_number(db, group)
-        self.message_manager.set_workflow_status(
-            db,
-            message,
-            MessageWorkflowStatus.DELIVERING.value,
-        )
-        db.commit()
-
-        delivered_ids: list[str] = []
-        failures: list[dict] = []
-
-        for recipient in recipients:
-            try:
-                outbound = self.messaging_service.send_message(
-                    db,
-                    group=group,
-                    to_member=recipient,
-                    from_phone_number=from_number,
-                    body=message.body,  # original SMS unchanged
-                    parent_message_id=message.id,
-                )
-                delivered_ids.append(str(outbound.id))
-            except SmsProviderError as exc:
-                failures.append(
-                    {
-                        "member_id": str(recipient.id),
-                        "error": str(exc),
-                    }
-                )
-
-        if failures and not delivered_ids:
-            status = MessageWorkflowStatus.DELIVERY_FAILED.value
-            notes = f"fanout_failed count={len(failures)}"
-        elif failures:
-            status = MessageWorkflowStatus.PARTIALLY_DELIVERED.value
-            notes = (
-                f"fanout_partial sent={len(delivered_ids)} "
-                f"failed={len(failures)}"
-            )
-        else:
-            status = MessageWorkflowStatus.DELIVERED.value
-            notes = f"fanout_count={len(delivered_ids)}"
-
-        self.message_manager.set_workflow_status(
-            db,
-            message,
-            status,
-            processing_notes=notes,
-        )
-        db.commit()
+        try:
+            delivery = self.routing_service.fan_out(db, message, recipients)
+        except RoutingError as exc:
+            raise ModerationError(str(exc)) from exc
 
         summary = self._message_summary(db, message)
-        summary["delivered_outbound_ids"] = delivered_ids
-        summary["delivery_failures"] = failures
+        summary.update(delivery)
         return summary
 
     def _require_awaiting(
@@ -247,13 +212,6 @@ class ModerationService:
                 )
             members.append(membership.member)
         return members
-
-    def _group_from_number(self, db: Session, group: Group) -> str:
-        numbers = self.phone_number_manager.list_for_group(db, group.id)
-        assigned = [n for n in numbers if n.status == "assigned"]
-        if not assigned:
-            raise ModerationError("Group has no assigned TextRoute number.")
-        return assigned[0].phone_number
 
     def _member_brief(
         self,
@@ -318,11 +276,13 @@ class ModerationService:
                 message.suggested_recipient_ids,
                 group_id=message.group_id,
             ),
-            "approved_recipients": self._recipients_brief(
+            "routed_recipients": self._recipients_brief(
                 db,
-                message.approved_recipient_ids,
+                message.routed_recipient_ids,
                 group_id=message.group_id,
             ),
+            "kind": message.kind,
+            "routing_policy": message.routing_policy,
             "parent_message_id": (
                 str(message.parent_message_id) if message.parent_message_id else None
             ),
