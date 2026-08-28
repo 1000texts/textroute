@@ -108,6 +108,27 @@ Postgres stores its data in the `postgres_data` Docker volume, which survives
   very first start. Schema changes made later are not applied by editing those
   files; run migrations against the live database.
 
+### Connecting a client to the production database
+
+Postgres publishes no port and sits on an internal Docker network, so it is
+unreachable from the internet and from the server's own host ports. For a
+one-off query, go through the container:
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres psql -U postgres -d postgres
+```
+
+For a GUI client or anything else needing TCP, forward a local port over SSH
+rather than publishing one:
+
+```bash
+./infra/scripts/db-tunnel.sh <ssh-host>     # then connect to localhost:15432
+```
+
+Resist the temptation to add a `ports:` entry for Postgres. It will not work
+while the database is on an internal network, and removing that isolation to
+make it work trades a permanent weakening for a temporary convenience.
+
 Take backups regardless, since a single volume on a single machine is one
 mistake away from gone:
 
