@@ -17,6 +17,10 @@ class Config:
     SMS_PROVIDER = os.getenv("SMS_PROVIDER", "logging")
     SMS_PROVIDER_URL = os.getenv("SMS_PROVIDER_URL")
 
+    # Shared secret for inbound provider webhooks. Unset means the webhook
+    # refuses every request; see api/dependencies.verify_webhook_secret.
+    WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
     AUTH_SECRET = os.getenv("AUTH_SECRET")
     AUTH_CHALLENGE_TTL_SECONDS = int(os.getenv("AUTH_CHALLENGE_TTL_SECONDS", "600"))
     AUTH_SESSION_TTL_SECONDS = int(os.getenv("AUTH_SESSION_TTL_SECONDS", "28800"))

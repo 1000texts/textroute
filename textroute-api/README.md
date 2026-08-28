@@ -192,7 +192,7 @@ resolver, then reply-intent analysis — not a giant schema rewrite.
 | `PATCH` | `/group/settings` | `{ "routing_policy": "auto_group" }` |
 | `GET` | `/members` | List members in the authenticated group |
 | `POST` | `/members` | Add consented members to authenticated group |
-| `POST` | `/webhook/messages` | Inbound SMS (`from` / `to` / `body`) |
+| `POST` | `/webhook/messages` | Inbound SMS (`from` / `to` / `body`); requires `X-Webhook-Secret` |
 | `POST` | `/webhook/inbound` | Alias of `/webhook/messages` |
 | `GET` | `/moderation/queue` | Authenticated group's review queue (source of truth for the needs-review count) |
 | `GET` | `/messages` | All inbound messages for the group, any status (max 100) |

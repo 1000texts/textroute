@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from src.api.dependencies import verify_webhook_secret
 from src.core.phone_normalize import InvalidPhoneNumberError
 from src.db.db import get_db
 from src.schemas.api import IncomingMessageRequest
@@ -20,7 +21,12 @@ from src.services.inbound_message_service import InboundMessageService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/webhook", tags=["webhooks"])
+router = APIRouter(
+    prefix="/webhook",
+    tags=["webhooks"],
+    # Applied at the router so a future webhook route cannot be added unguarded.
+    dependencies=[Depends(verify_webhook_secret)],
+)
 
 
 @router.post("/messages")

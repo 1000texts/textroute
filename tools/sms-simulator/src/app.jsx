@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
 
+// Development only. In production the simulator calls its own origin and nginx
+// injects the webhook secret server-side, because anything inlined here ends up
+// readable in the public JavaScript bundle.
+const WEBHOOK_SECRET = import.meta.env.VITE_WEBHOOK_SECRET
+
 const STORAGE_KEY_FROM = 'sms-simulator.from'
 const STORAGE_KEY_TO = 'sms-simulator.to'
 
@@ -66,7 +71,10 @@ export default function App() {
                 payload,
                 {
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
+                        ...(WEBHOOK_SECRET
+                            ? { 'X-Webhook-Secret': WEBHOOK_SECRET }
+                            : {})
                     },
                     responseType: 'text'
                 }
