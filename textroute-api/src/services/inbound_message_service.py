@@ -7,11 +7,12 @@ never re-routed.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src.config.config import Config
 from src.core.managers.membership_manager import MembershipManager
 from src.core.managers.message_manager import MessageManager
 from src.core.managers.request_event_manager import RequestEventManager
@@ -72,10 +73,11 @@ class InboundMessageService:
     group policy authorizes it — never for replies, and never as approval.
     """
 
-    # How long a request stays open before the expiry sweep closes it. A
-    # neighbourhood favour that nobody has answered in three days is stale, and
-    # leaving it open would keep capturing unrelated messages as replies.
-    REQUEST_EXPIRES_AFTER = timedelta(hours=72)
+    # The absolute ceiling on a request's life, not the usual way one ends: an
+    # idle request is closed after REQUEST_INACTIVITY_AFTER by the same sweep.
+    # This bound only catches a request that keeps seeing activity yet never
+    # resolves.
+    REQUEST_EXPIRES_AFTER = Config.REQUEST_EXPIRES_AFTER
 
     def __init__(
         self,

@@ -101,6 +101,15 @@ class Requests(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # When a message last entered this request. Stored rather than derived from
+    # max(messages.created_at) so the inactivity sweep is one indexed read of
+    # this table instead of an aggregate over every message; MessageManager
+    # maintains it on insert, which is the only way in.
+    last_activity_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
     group = relationship("Group")
     requester = relationship(

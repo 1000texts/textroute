@@ -35,6 +35,7 @@ def _request(**overrides):
         completed_at=None,
         cancelled_at=None,
         expires_at=None,
+        last_activity_at=datetime.now(timezone.utc),
         group=SimpleNamespace(id=GROUP_ID),
     )
     base.update(overrides)
@@ -80,23 +81,38 @@ def test_the_member_side_of_a_request_all_counts():
 
 
 def test_rollup_maps_each_column_to_the_right_field():
-    """Five positional columns, so a reordering would silently swap meanings."""
+    """Four positional columns, so a reordering would silently swap meanings."""
     db = MagicMock()
-    last_activity = datetime.now(timezone.utc)
     db.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
-        (7, 4, last_activity, 3, True),
-        (8, 1, last_activity, 1, False),
+        (7, 4, 3, True),
+        (8, 1, 1, False),
     ]
 
     rollups = RequestManager().summarize_activity(db, request_ids=[7, 8])
 
     assert rollups[7] == {
         "message_count": 4,
-        "last_activity_at": last_activity,
         "participant_count": 3,
         "needs_review": True,
     }
     assert rollups[8]["needs_review"] is False
+
+
+def test_rollup_does_not_compute_last_activity():
+    """It belongs to the requests table, because the sweep filters on it.
+
+    Two answers to "when did this last see activity" is one too many: the one
+    shown to a moderator would be free to drift from the one that closes the
+    request.
+    """
+    db = MagicMock()
+    db.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
+        (7, 4, 3, True),
+    ]
+
+    rollups = RequestManager().summarize_activity(db, request_ids=[7])
+
+    assert "last_activity_at" not in rollups[7]
 
 
 def test_rollup_skips_the_query_when_there_is_nothing_to_roll_up():
@@ -127,11 +143,12 @@ def test_summary_reports_the_rollup_for_its_own_request():
     db.query.return_value.filter.return_value.first.return_value = None
     last_activity = datetime.now(timezone.utc)
     request_mgr = MagicMock()
-    request_mgr.list_for_group.return_value = [_request(id=7)]
+    request_mgr.list_for_group.return_value = [
+        _request(id=7, last_activity_at=last_activity)
+    ]
     request_mgr.summarize_activity.return_value = {
         7: {
             "message_count": 5,
-            "last_activity_at": last_activity,
             "participant_count": 3,
             "needs_review": True,
         }
@@ -143,6 +160,7 @@ def test_summary_reports_the_rollup_for_its_own_request():
     assert summary["participant_count"] == 3
     assert summary["message_count"] == 5
     assert summary["needs_review"] is True
+    # From the request row, not the rollup: the same value the sweep judges.
     assert summary["last_activity_at"] == last_activity.isoformat()
 
 
@@ -160,7 +178,9 @@ def test_a_request_with_no_messages_reports_zeroes_not_nulls():
     assert summary["participant_count"] == 0
     assert summary["message_count"] == 0
     assert summary["needs_review"] is False
-    assert summary["last_activity_at"] is None
+    # Still a real timestamp: a request is active from the moment it exists, so
+    # this is NOT NULL even before any message lands.
+    assert summary["last_activity_at"] is not None
 
 
 # -- analyzer confidence ---------------------------------------------------

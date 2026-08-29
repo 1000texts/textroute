@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.config.config import Config
 from src.core.providers.sms_provider import SmsProviderError
 from src.domain.message_role import MessageKind, RequestEventType
 from src.services.request_service import (
@@ -37,6 +38,7 @@ def _request(**overrides):
         completed_at=None,
         cancelled_at=None,
         expires_at=None,
+        last_activity_at=datetime.now(timezone.utc),
         group=SimpleNamespace(id=GROUP_ID),
     )
     base.update(overrides)
@@ -103,18 +105,26 @@ def test_another_groups_request_looks_like_not_found():
         service.get_request(db, 7, group_id=GROUP_ID)
 
 
-def test_sweep_closes_open_requests_past_expiry():
-    """Without this an abandoned request keeps capturing unrelated messages."""
-    db = MagicMock()
-    expired_at = datetime.now(timezone.utc) - timedelta(hours=1)
-    stale = [_request(id=1, expires_at=expired_at), _request(id=2, expires_at=expired_at)]
-
+def _sweep(stale):
+    """A service whose sweep will find exactly ``stale``."""
     request_mgr = MagicMock()
-    request_mgr.list_open_past_expiry.return_value = stale
+    request_mgr.list_open_needing_close.return_value = stale
     event_mgr = MagicMock()
     service = _service(
         None, request_manager=request_mgr, request_event_manager=event_mgr
     )
+    return service, request_mgr, event_mgr
+
+
+def test_sweep_closes_stale_requests():
+    """Without this an abandoned request keeps capturing unrelated messages."""
+    db = MagicMock()
+    expired_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    stale = [
+        _request(id=1, expires_at=expired_at),
+        _request(id=2, expires_at=expired_at),
+    ]
+    service, request_mgr, event_mgr = _sweep(stale)
 
     assert service.sweep_expired(db) == 2
     assert request_mgr.expire.call_count == 2
@@ -122,6 +132,95 @@ def test_sweep_closes_open_requests_past_expiry():
         RequestEventType.EXPIRED,
         RequestEventType.EXPIRED,
     ]
+
+
+def test_sweep_asks_for_both_bounds():
+    """Inactivity is the normal closure; expiry is only the ceiling."""
+    db = MagicMock()
+    now = datetime.now(timezone.utc)
+    service, request_mgr, _ = _sweep([])
+
+    service.sweep_expired(db, now=now)
+
+    kwargs = request_mgr.list_open_needing_close.call_args.kwargs
+    assert kwargs["now"] == now
+    assert kwargs["inactive_before"] == now - Config.REQUEST_INACTIVITY_AFTER
+
+
+def test_an_idle_request_closes_for_inactivity():
+    """Quiet for two hours and nowhere near its 72-hour ceiling."""
+    db = MagicMock()
+    now = datetime.now(timezone.utc)
+    idle = _request(
+        id=1,
+        last_activity_at=now - timedelta(hours=3),
+        expires_at=now + timedelta(hours=60),
+    )
+    service, _, event_mgr = _sweep([idle])
+
+    service.sweep_expired(db, now=now)
+
+    payload = event_mgr.record.call_args.kwargs["payload"]
+    assert payload["reason"] == "inactivity"
+
+
+def test_a_request_past_its_ceiling_closes_for_maximum_lifetime():
+    """Still being talked in, but out of time."""
+    db = MagicMock()
+    now = datetime.now(timezone.utc)
+    old = _request(
+        id=1,
+        last_activity_at=now - timedelta(minutes=1),
+        expires_at=now - timedelta(minutes=1),
+    )
+    service, _, event_mgr = _sweep([old])
+
+    service.sweep_expired(db, now=now)
+
+    payload = event_mgr.record.call_args.kwargs["payload"]
+    assert payload["reason"] == "maximum_lifetime"
+
+
+def test_the_ceiling_wins_when_a_request_is_both_idle_and_expired():
+    """The harder bound names the reason; 72 hours is finished either way."""
+    db = MagicMock()
+    now = datetime.now(timezone.utc)
+    both = _request(
+        id=1,
+        last_activity_at=now - timedelta(hours=5),
+        expires_at=now - timedelta(hours=1),
+    )
+    service, _, event_mgr = _sweep([both])
+
+    service.sweep_expired(db, now=now)
+
+    assert event_mgr.record.call_args.kwargs["payload"]["reason"] == "maximum_lifetime"
+
+
+def test_the_expired_event_carries_both_timestamps_it_was_judged_against():
+    """"Why did this close" is only answerable next to the values behind it."""
+    db = MagicMock()
+    now = datetime.now(timezone.utc)
+    last_activity = now - timedelta(hours=3)
+    service, _, event_mgr = _sweep(
+        [_request(id=1, last_activity_at=last_activity, expires_at=None)]
+    )
+
+    service.sweep_expired(db, now=now)
+
+    payload = event_mgr.record.call_args.kwargs["payload"]
+    assert payload["last_activity_at"] == last_activity.isoformat()
+    assert payload["expires_at"] is None
+
+
+def test_sweep_of_nothing_still_commits_cleanly():
+    """The scheduled runner calls this constantly with nothing to do."""
+    db = MagicMock()
+    service, request_mgr, event_mgr = _sweep([])
+
+    assert service.sweep_expired(db) == 0
+    request_mgr.expire.assert_not_called()
+    event_mgr.record.assert_not_called()
 
 
 # -- moderator-authored messages -------------------------------------------

@@ -1,10 +1,11 @@
 from uuid import UUID
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.domain.message_role import MessageKind, build_message_role
 from src.domain.message_status import MessageWorkflowStatus
-from src.models import Message
+from src.models import Message, Requests
 
 
 class MessageManager:
@@ -82,6 +83,7 @@ class MessageManager:
         )
         db.add(message)
         db.flush()
+        self._touch_request(db, request_id)
         return message
 
     def create_outbound(
@@ -124,7 +126,33 @@ class MessageManager:
         )
         db.add(message)
         db.flush()
+        self._touch_request(db, request_id)
         return message
+
+    @staticmethod
+    def _touch_request(db: Session, request_id: int | None) -> None:
+        """Record that the request just saw activity.
+
+        Here rather than in the services because both message constructors are
+        the only way a row enters a request, which makes
+        ``requests.last_activity_at == max(messages.created_at)`` true by
+        construction. The alternative -- each service calling a ``touch`` after
+        creating a message -- is four call sites today and silently wrong the
+        first time a fifth message path is added.
+
+        ``func.now()`` is transaction time in Postgres, the same clock that
+        fills ``messages.created_at``, so the two agree exactly instead of
+        differing by however long the flush took.
+        """
+        if request_id is None:
+            return
+        db.query(Requests).filter(Requests.id == request_id).update(
+            {"last_activity_at": func.now()},
+            # The in-session Requests object may keep a stale value until it is
+            # next loaded. Nothing reads it inside the same unit of work, and
+            # leaving it alone avoids a SELECT on every message insert.
+            synchronize_session=False,
+        )
 
     def set_workflow_status(
         self,

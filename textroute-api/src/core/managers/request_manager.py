@@ -7,7 +7,7 @@ lifecycle. This manager flushes and never commits -- services own transactions.
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import case, distinct, func
+from sqlalchemy import and_, case, distinct, func, or_
 from sqlalchemy.orm import Session
 
 from src.domain.message_role import PARTICIPANT_KINDS, MessageKind
@@ -95,6 +95,10 @@ class RequestManager:
             requester_id=requester_id,
             status="open",
             expires_at=expires_at,
+            # Explicit rather than left to the column default: a request is
+            # created microseconds before its original message, and an idle
+            # request must never look older than it is.
+            last_activity_at=datetime.now(timezone.utc),
         )
         db.add(request)
         db.flush()
@@ -171,19 +175,33 @@ class RequestManager:
             query = query.filter(Requests.status.in_(statuses))
         return query.order_by(Requests.created_at.desc()).limit(limit).all()
 
-    def list_open_past_expiry(
+    def list_open_needing_close(
         self,
         db: Session,
         *,
-        now: datetime | None = None,
+        now: datetime,
+        inactive_before: datetime,
     ) -> list[Requests]:
-        now = now or datetime.now(timezone.utc)
+        """Open requests that either went quiet or ran out of time.
+
+        One query for both bounds, because they are two reasons for the same
+        outcome and a second query would be a second chance to disagree about
+        which requests are still open.
+
+        ``expires_at`` is nullable and an unset one means no ceiling, so it is
+        guarded; ``last_activity_at`` is NOT NULL and needs no guard.
+        """
         return (
             db.query(Requests)
             .filter(
                 Requests.status == "open",
-                Requests.expires_at.isnot(None),
-                Requests.expires_at <= now,
+                or_(
+                    and_(
+                        Requests.expires_at.isnot(None),
+                        Requests.expires_at <= now,
+                    ),
+                    Requests.last_activity_at <= inactive_before,
+                ),
             )
             .all()
         )
@@ -200,6 +218,11 @@ class RequestManager:
         without being a party to it. ``PARTICIPANT_KINDS`` holds that rule, and
         ``COUNT(DISTINCT ...)`` drops the NULLs the CASE produces for every
         other kind.
+
+        Last activity is deliberately absent: it lives on
+        ``requests.last_activity_at`` now, because the sweep needs to filter on
+        it. Computing ``max(created_at)`` here as well would be a second answer
+        to the same question, free to drift from the one that closes requests.
         """
         if not request_ids:
             return {}
@@ -209,7 +232,6 @@ class RequestManager:
             db.query(
                 Message.request_id,
                 func.count(Message.id),
-                func.max(Message.created_at),
                 func.count(
                     distinct(
                         case(
@@ -233,14 +255,12 @@ class RequestManager:
         return {
             request_id: {
                 "message_count": message_count,
-                "last_activity_at": last_activity_at,
                 "participant_count": participant_count,
                 "needs_review": bool(needs_review),
             }
             for (
                 request_id,
                 message_count,
-                last_activity_at,
                 participant_count,
                 needs_review,
             ) in rows

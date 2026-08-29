@@ -125,6 +125,65 @@ def test_a_moderator_clarification_without_an_author_is_refused():
     db.add.assert_not_called()
 
 
+# -- keeping requests.last_activity_at true --------------------------------
+
+
+def test_an_inbound_message_bumps_its_requests_activity():
+    """The invariant holds here because this is the only way a row gets in."""
+    db = MagicMock()
+
+    MessageManager().create_inbound(
+        db,
+        group_id=GROUP_ID,
+        member_id=uuid4(),
+        kind=MessageKind.MEMBER_REPLY,
+        request_id=3,
+        from_phone_number="+15551112222",
+        to_phone_number="+15559876543",
+        body="I have one",
+    )
+
+    update = db.query.return_value.filter.return_value.update
+    update.assert_called_once()
+    assert "last_activity_at" in update.call_args.args[0]
+
+
+def test_an_outbound_message_bumps_its_requests_activity():
+    """A fan-out copy is activity too: the request is demonstrably alive."""
+    db = MagicMock()
+
+    MessageManager().create_outbound(
+        db,
+        group_id=GROUP_ID,
+        member_id=uuid4(),
+        kind=MessageKind.FANOUT_COPY,
+        request_id=3,
+        from_phone_number="+15559876543",
+        to_phone_number="+15552223333",
+        body="Does anyone have an axe?",
+    )
+
+    db.query.return_value.filter.return_value.update.assert_called_once()
+
+
+def test_a_message_belonging_to_no_request_bumps_nothing():
+    """Not every message has a request; there is nothing to touch."""
+    db = MagicMock()
+
+    MessageManager().create_outbound(
+        db,
+        group_id=GROUP_ID,
+        member_id=uuid4(),
+        kind=MessageKind.FANOUT_COPY,
+        request_id=None,
+        from_phone_number="+15559876543",
+        to_phone_number="+15552223333",
+        body="x",
+    )
+
+    db.query.assert_not_called()
+
+
 def test_recording_a_routing_policy_never_revises_the_kind():
     """Kind is stamped once at ingress; only the policy snapshot lands later."""
     db = MagicMock()

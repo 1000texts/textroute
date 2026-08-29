@@ -1,23 +1,27 @@
-"""Exercise the request rollup against a real database.
+"""Exercise the request rollup and lifecycle sweep against a real database.
 
 The rollup leans on Postgres-specific SQL (``bool_or``, ``COUNT(DISTINCT CASE
-...)``) that a mocked Session cannot check, and the participant rule is only
-meaningful against real rows. Run it after applying the migration:
+...)``) that a mocked Session cannot check, the participant rule is only
+meaningful against real rows, and the sweep's ``or_``/``and_`` over a nullable
+``expires_at`` is likewise untestable with mocks. Read-only: it reports what a
+sweep would close without closing anything. Run it after applying the migration:
 
     ./.venv/bin/python scripts/verify_request_rollup.py
 """
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
 load_dotenv("../.env")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import create_engine, event  # noqa: E402
+from sqlalchemy import create_engine, event, func  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+from src.config.config import Config  # noqa: E402
 from src.core.managers.request_manager import RequestManager  # noqa: E402
 from src.domain.message_role import MessageKind  # noqa: E402
 from src.models import Message, Requests  # noqa: E402
@@ -122,6 +126,55 @@ def main() -> int:
         )
         if copies and None in operations:
             failures.append("a fan-out copy has no parent to group it by")
+
+        # 5. last_activity_at is a real timestamp on every request, and agrees
+        # with the message history. The backfill is the only thing that can make
+        # this true for rows that predate the column, so a mismatch here means
+        # the migration did not run or ran before some messages existed.
+        for request in requests:
+            newest = (
+                db.query(func.max(Message.created_at))
+                .filter(Message.request_id == request.id)
+                .scalar()
+            )
+            if request.last_activity_at is None:
+                failures.append(f"request {request.id}: last_activity_at is NULL")
+                continue
+            # Not equality: the column is bumped per insert, so a request whose
+            # messages were all deleted legitimately keeps a later timestamp.
+            if newest is not None and request.last_activity_at < newest:
+                failures.append(
+                    f"request {request.id}: last_activity_at "
+                    f"{request.last_activity_at} predates its newest message "
+                    f"{newest}"
+                )
+
+        # 6. The sweep query runs. Its or_/and_ over a nullable expires_at plus a
+        # NOT NULL last_activity_at is exactly what a mocked Session cannot
+        # check. Called with a cutoff far in the past so it selects nothing and
+        # stays safe to run against production data.
+        now = datetime.now(timezone.utc)
+        candidates = manager.list_open_needing_close(
+            db,
+            now=now - timedelta(days=3650),
+            inactive_before=now - timedelta(days=3650),
+        )
+        print(f"sweep query executed; {len(candidates)} request(s) match a 10-year cutoff")
+        if candidates:
+            failures.append(
+                "the sweep matched requests against a 10-year-old cutoff, "
+                "which means the bounds are inverted"
+            )
+
+        # What a real sweep would close right now, reported without closing it.
+        due = manager.list_open_needing_close(
+            db,
+            now=now,
+            inactive_before=now - Config.REQUEST_INACTIVITY_AFTER,
+        )
+        for request in due:
+            reason = RequestService._close_reason(request, now=now)
+            print(f"request {request.id}: due to close, reason={reason}")
 
     if failures:
         print("\nFAILURES:")

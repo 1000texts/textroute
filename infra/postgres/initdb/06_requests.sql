@@ -28,7 +28,13 @@ CREATE TABLE public.requests (
     created_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz NULL,
     cancelled_at timestamptz NULL,
+    -- The absolute ceiling on a request's life. Not the usual way one ends: see
+    -- last_activity_at below.
     expires_at timestamptz NULL,
+    -- When a message last entered this request. Maintained on message insert and
+    -- stored rather than derived from max(messages.created_at), so the
+    -- inactivity sweep reads one indexed column instead of aggregating messages.
+    last_activity_at timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT requests_pkey
         PRIMARY KEY (id),
@@ -78,6 +84,12 @@ CREATE INDEX idx_requests_filters_gin
 
 CREATE INDEX idx_requests_type_created
     ON public.requests (request_type, created_at DESC);
+
+-- Serves the inactivity sweep, which only ever asks about open requests. Partial
+-- so it stays small: closed requests are the overwhelming majority over time.
+CREATE INDEX idx_requests_open_last_activity
+    ON public.requests (last_activity_at)
+    WHERE status = 'open';
 
 -- One live request per person, not per group: several members may be waiting
 -- on unrelated things at once, and a group-wide lock would make one member's

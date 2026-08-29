@@ -14,6 +14,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from src.config.config import Config
 from src.core.managers.membership_manager import MembershipManager
 from src.core.managers.message_manager import MessageManager
 from src.core.managers.phone_number_manager import PhoneNumberManager
@@ -209,26 +210,65 @@ class RequestService:
         )
 
     def sweep_expired(self, db: Session, *, now: datetime | None = None) -> int:
-        """Close requests nobody resolved. Intended for a scheduled job.
+        """Advance the lifecycle of requests nobody closed. Run on a schedule.
 
-        Without this, an abandoned request keeps capturing its requester's
-        unrelated messages as replies forever, because request membership is now
-        what threads them.
+        Two bounds, one outcome. Inactivity is the normal one: a conversation
+        that has gone quiet is over, and leaving it open makes the next
+        unrelated SMS from those members a reply to it. Expiry is the ceiling
+        for a request that keeps seeing activity yet never resolves.
+
+        Both land on ``status = 'expired'`` with an ``EXPIRED`` event, because
+        they mean the same thing to a moderator -- closed without resolution.
+        Only the event payload's ``reason`` distinguishes them, which keeps the
+        status vocabulary at four values.
+
+        Nothing here is a classification fix. ``determine_inbound_kind`` is
+        already correct; it was being handed an open request that should have
+        been closed hours earlier.
         """
         now = now or datetime.now(timezone.utc)
-        stale = self.request_manager.list_open_past_expiry(db, now=now)
+        inactive_before = now - Config.REQUEST_INACTIVITY_AFTER
+        stale = self.request_manager.list_open_needing_close(
+            db,
+            now=now,
+            inactive_before=inactive_before,
+        )
+        reasons: dict[str, int] = {}
         for request in stale:
+            reason = self._close_reason(request, now=now)
+            reasons[reason] = reasons.get(reason, 0) + 1
             self.request_manager.expire(db, request)
             self.request_event_manager.record(
                 db,
                 request_id=request.id,
                 event_type=RequestEventType.EXPIRED,
-                payload={"expires_at": request.expires_at.isoformat()},
+                # Both timestamps, not just the deciding one: reading the trail
+                # later, "why did this close" is only answerable next to the
+                # values it was judged against.
+                payload={
+                    "reason": reason,
+                    "expires_at": self._iso(request.expires_at),
+                    "last_activity_at": self._iso(request.last_activity_at),
+                },
             )
         db.commit()
         if stale:
-            logger.info("requests_expired", extra={"count": len(stale)})
+            logger.info(
+                "requests_expired",
+                extra={"count": len(stale), "reasons": reasons},
+            )
         return len(stale)
+
+    @staticmethod
+    def _close_reason(request: Requests, *, now: datetime) -> str:
+        """Which bound closed this request.
+
+        The lifetime ceiling wins when both apply: it is the harder limit, and
+        a request past 72 hours is finished whether or not it was also quiet.
+        """
+        if request.expires_at is not None and request.expires_at <= now:
+            return "maximum_lifetime"
+        return "inactivity"
 
     def _resolve(
         self,
@@ -335,7 +375,10 @@ class RequestService:
             # reached, and anyone who answered. A moderator is not one of them.
             "participant_count": rollup.get("participant_count", 0),
             "message_count": rollup.get("message_count", 0),
-            "last_activity_at": self._iso(rollup.get("last_activity_at")),
+            # From the column, not the rollup: this is the same value the sweep
+            # judges inactivity against, so what a moderator sees and what
+            # closes the request can never disagree.
+            "last_activity_at": self._iso(request.last_activity_at),
             # Whether a message in this thread is waiting on a human. Not a
             # request status: a request can be open with or without this.
             "needs_review": rollup.get("needs_review", False),

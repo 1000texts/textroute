@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -31,6 +32,20 @@ class Config:
     REQUEST_EMBEDDING_DIMENSIONS = int(
         os.getenv("REQUEST_EMBEDDING_DIMENSIONS", "1024")
     )
+    # Two bounds on how long a request stays open, both closing it as 'expired'.
+    #
+    # Inactivity is the normal one: a conversation that has gone quiet for two
+    # hours is over, and leaving it open would capture the next unrelated SMS as
+    # a reply to it. Expiry is the safety limit for a request that keeps seeing
+    # activity but never resolves. Neither has any effect unless the sweep runs;
+    # see scripts/sweep_requests.py.
+    REQUEST_INACTIVITY_AFTER = timedelta(
+        hours=int(os.getenv("REQUEST_INACTIVITY_AFTER_HOURS", "2"))
+    )
+    REQUEST_EXPIRES_AFTER = timedelta(
+        hours=int(os.getenv("REQUEST_EXPIRES_AFTER_HOURS", "72"))
+    )
+
     SMS_PROVIDER = os.getenv("SMS_PROVIDER", "logging")
     SMS_PROVIDER_URL = os.getenv("SMS_PROVIDER_URL")
 
