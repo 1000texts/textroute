@@ -38,11 +38,17 @@ class GroupService:
         name: str,
         description: str | None,
         moderator_phone_number: str,
+        moderator_name: str,
     ) -> dict:
         """Atomic create: group + moderator membership + phone assignment."""
+        moderator_name = moderator_name.strip()
+        if not moderator_name:
+            raise ValueError("Moderator name is required.")
+
         moderator = self.membership_manager.get_or_create_by_phone(
             db,
             moderator_phone_number,
+            name=moderator_name,
         )
 
         group = self.group_manager.create_group(
@@ -51,12 +57,21 @@ class GroupService:
             description=description,
         )
 
-        self.membership_manager.join_group(
+        membership = self.membership_manager.join_group(
             db,
             member_id=moderator.id,
             group_id=group.id,
             role="moderator",
             status="active",
+        )
+
+        # The members list reads the per-membership profile first and falls back
+        # to members.name, so write both. Otherwise the moderator's own name
+        # would render through a different path than everyone they enroll.
+        self.membership_manager.upsert_profile(
+            db,
+            membership_id=membership.id,
+            display_name=moderator_name,
         )
 
         phone_number = self.phone_number_manager.assign_available_number(
@@ -72,6 +87,7 @@ class GroupService:
             "description": group.description,
             "status": group.status,
             "moderator_member_id": str(moderator.id),
+            "moderator_name": moderator.name,
             "phone_number": phone_number.phone_number,
         }
 

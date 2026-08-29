@@ -6,7 +6,7 @@ status value or vocabulary — otherwise stored data ends up claiming a human
 approved something no human ever saw.
 
 This policy governs ``NEW_REQUEST`` only. Replies are never routed by policy
-(see ``src.domain.message_kind``).
+(see ``src.domain.message_role``).
 """
 
 import logging

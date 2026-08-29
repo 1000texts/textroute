@@ -39,8 +39,11 @@ class Member(Base):
     memberships: Mapped[list["GroupMembership"]] = relationship(
         back_populates="member",
     )
+    # Messages this member is the subject of. Two foreign keys now point here,
+    # so name the one meant: authored messages hang off Message.author.
     messages: Mapped[list["Message"]] = relationship(
         back_populates="member",
+        foreign_keys="Message.member_id",
     )
     requests: Mapped[list["Requests"]] = relationship(
         back_populates="requester",

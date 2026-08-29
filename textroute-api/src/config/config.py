@@ -16,6 +16,21 @@ class Config:
     SQL_ECHO = _env_bool("SQL_ECHO", False)
     LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH")
     LLM_EMBEDDING_MODEL_GGUF = os.getenv("LLM_EMBEDDING_MODEL_GGUF")
+
+    # Request analysis. Off by default so a checkout with no Ollama running
+    # still handles inbound SMS -- the keyword fallback takes over.
+    REQUEST_ANALYSIS_ENABLED = _env_bool("REQUEST_ANALYSIS_ENABLED", False)
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2")
+    # Must emit 1024 dimensions to match requests.embedding and its ivfflat
+    # index. Changing the model means a migration, not just an env var.
+    OLLAMA_EMBEDDING_MODEL = os.getenv(
+        "OLLAMA_EMBEDDING_MODEL",
+        "qwen3-embedding:0.6b",
+    )
+    REQUEST_EMBEDDING_DIMENSIONS = int(
+        os.getenv("REQUEST_EMBEDDING_DIMENSIONS", "1024")
+    )
     SMS_PROVIDER = os.getenv("SMS_PROVIDER", "logging")
     SMS_PROVIDER_URL = os.getenv("SMS_PROVIDER_URL")
 

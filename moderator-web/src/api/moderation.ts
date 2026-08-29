@@ -23,8 +23,11 @@ export type ModerationMessage = {
   // authorized. Read workflow_status to tell which.
   routed_recipients: MemberBrief[];
   eligible_recipients?: MemberBrief[];
+  sender_role: string | null;
   kind: string | null;
   routing_policy: string | null;
+  /** The conversation this message belongs to. */
+  request_id: number | null;
   processing_notes: string | null;
   created_at: string | null;
   delivered_outbound_ids?: string[];

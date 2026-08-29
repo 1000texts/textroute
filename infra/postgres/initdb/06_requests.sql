@@ -15,8 +15,12 @@ CREATE TABLE public.requests (
     request_type text NULL,
     extracted_filters jsonb NOT NULL DEFAULT '{}'::jsonb,
     summary text NULL,
-    -- IVFFLAT requires a fixed vector dimension.
-    embedding public.vector(1536) NULL,
+    -- How sure the analyzer was about request_type. Nullable rather than
+    -- defaulted: no analysis and a genuinely unsure answer are different facts.
+    confidence double precision NULL,
+    -- IVFFLAT requires a fixed vector dimension. 1024 matches the configured
+    -- Qwen3 embedding model; changing model means changing this and reindexing.
+    embedding public.vector(1024) NULL,
 
     schema_version int4 NOT NULL DEFAULT 1,
     model_name text NULL,
@@ -42,6 +46,12 @@ CREATE TABLE public.requests (
     CONSTRAINT requests_extracted_filters_is_object
         CHECK (
             jsonb_typeof(extracted_filters) = 'object'
+        ),
+
+    CONSTRAINT requests_confidence_range
+        CHECK (
+            confidence IS NULL
+            OR (confidence >= 0 AND confidence <= 1)
         )
 );
 
@@ -69,6 +79,9 @@ CREATE INDEX idx_requests_filters_gin
 CREATE INDEX idx_requests_type_created
     ON public.requests (request_type, created_at DESC);
 
-CREATE UNIQUE INDEX idx_requests_one_active_per_group
-    ON public.requests (group_id)
+-- One live request per person, not per group: several members may be waiting
+-- on unrelated things at once, and a group-wide lock would make one member's
+-- open request block everyone else's.
+CREATE UNIQUE INDEX idx_requests_one_open_per_requester
+    ON public.requests (group_id, requester_id)
     WHERE status = 'open';

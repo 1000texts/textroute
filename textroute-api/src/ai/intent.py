@@ -5,9 +5,11 @@ from src.domain.routing import INTENT_ALIASES, INTENT_SCHEMA_MAP
 from src.prompts.intent import build_intent_instruction
 
 
-def find_intent(text: str) -> str:
-    """
-    Determine the canonical intent for the given text using LLM only.
+def find_intent(text: str) -> Intent:
+    """Classify text into a canonical intent, with the model's own confidence.
+
+    Returns the whole ``Intent`` rather than just the string, because the
+    confidence has to travel with the classification it describes.
     """
     # Build instruction with canonical intents and aliases
     instruction = build_intent_instruction(
@@ -19,6 +21,4 @@ def find_intent(text: str) -> str:
 
     # Use structured output to parse JSON into Intent model
     intent_chain = LLM.with_structured_output(Intent)
-    inference = intent_chain.invoke(instruction)
-
-    return inference.intent
+    return intent_chain.invoke(instruction)

@@ -14,6 +14,7 @@ from src.core.providers.sms_provider import (
     SmsProviderError,
     get_sms_provider,
 )
+from src.domain.message_role import MessageKind
 from src.domain.message_status import MessageWorkflowStatus
 from src.models import Group, Member, Message
 
@@ -46,8 +47,18 @@ class MessagingService:
         to_member: Member,
         from_phone_number: str,
         body: str,
+        kind: MessageKind,
+        author_member_id=None,
+        request_id: int | None = None,
         parent_message_id=None,
     ) -> Message:
+        """Send one SMS and record it.
+
+        ``kind`` says what is being sent: a ``fanout_copy`` the system generated
+        from someone else's words, or a ``moderator_clarification`` a person
+        wrote. The two differ in whether ``author_member_id`` is set, which the
+        role shape enforces.
+        """
         logger.info(
             "outbound_message_sending",
             extra={
@@ -75,6 +86,9 @@ class MessagingService:
             db,
             group_id=group.id,
             member_id=to_member.id,
+            kind=kind,
+            author_member_id=author_member_id,
+            request_id=request_id,
             from_phone_number=from_phone_number,
             to_phone_number=to_member.phone_number,
             body=body,

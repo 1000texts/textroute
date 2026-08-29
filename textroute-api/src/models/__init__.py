@@ -11,6 +11,7 @@ from src.models.membership_consent import MembershipConsent
 from src.models.message import Message
 from src.models.moderator_auth import ModeratorLoginChallenge, ModeratorSession
 from src.models.phone_number import PhoneNumber
+from src.models.request_event import RequestEvent
 from src.models.requests import Requests
 
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     "ModeratorLoginChallenge",
     "ModeratorSession",
     "PhoneNumber",
+    "RequestEvent",
     "Requests",
 ]

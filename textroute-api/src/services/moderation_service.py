@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from src.core.managers.membership_manager import MembershipManager
 from src.core.managers.message_manager import MessageManager
 from src.core.managers.phone_number_manager import PhoneNumberManager
+from src.core.managers.request_event_manager import RequestEventManager
+from src.domain.message_role import RequestEventType
 from src.domain.message_status import MessageWorkflowStatus
 from src.models import Member, Message
 from src.services.routing_service import RoutingError, RoutingService
@@ -53,13 +55,16 @@ class ModerationService:
         membership_manager: MembershipManager | None = None,
         phone_number_manager: PhoneNumberManager | None = None,
         routing_service: RoutingService | None = None,
+        request_event_manager: RequestEventManager | None = None,
     ):
         self.message_manager = message_manager or MessageManager()
         self.membership_manager = membership_manager or MembershipManager()
         self.phone_number_manager = phone_number_manager or PhoneNumberManager()
+        self.request_event_manager = request_event_manager or RequestEventManager()
         self.routing_service = routing_service or RoutingService(
             message_manager=self.message_manager,
             phone_number_manager=self.phone_number_manager,
+            request_event_manager=self.request_event_manager,
         )
 
     def list_queue(self, db: Session, group_id: UUID) -> list[dict]:
@@ -153,6 +158,19 @@ class ModerationService:
             routed_recipient_ids=[m.id for m in recipients],
             workflow_status=MessageWorkflowStatus.APPROVED.value,
         )
+        # Same event as policy routing, different payload: both authorize a
+        # send, and the payload is where the audit trail says who or what did.
+        if message.request_id is not None:
+            self.request_event_manager.record(
+                db,
+                request_id=message.request_id,
+                event_type=RequestEventType.AUTHORIZED,
+                message_id=message.id,
+                payload={
+                    "by": "moderator",
+                    "recipient_ids": [str(m.id) for m in recipients],
+                },
+            )
         db.commit()
 
         try:
@@ -281,8 +299,11 @@ class ModerationService:
                 message.routed_recipient_ids,
                 group_id=message.group_id,
             ),
+            "sender_role": message.sender_role,
             "kind": message.kind,
             "routing_policy": message.routing_policy,
+            # Lets the moderator open the whole conversation this belongs to.
+            "request_id": message.request_id,
             "parent_message_id": (
                 str(message.parent_message_id) if message.parent_message_id else None
             ),

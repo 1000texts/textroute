@@ -6,7 +6,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from src.api.dependencies import get_moderator_context
-from src.api.routes.moderator import group as group_route
+from src.api.routes.moderator import group_settings as group_route
 from src.config.config import Config
 from src.db.db import get_db
 from src.main import app

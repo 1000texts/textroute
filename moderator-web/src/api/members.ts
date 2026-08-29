@@ -23,10 +23,30 @@ export type GroupMember = {
   role: string;
   status: string;
   joined_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** The fields a moderator may change on a member card. */
+export type MemberEdit = {
+  name: string;
+  phone_number: string;
+  role: string;
+  status: string;
 };
 
 export function listMembers(): Promise<GroupMember[]> {
   return apiRequest("/members");
+}
+
+export function updateMember(
+  membershipId: string,
+  edit: MemberEdit,
+): Promise<GroupMember> {
+  return apiRequest(`/members/${membershipId}`, {
+    method: "PATCH",
+    body: JSON.stringify(edit),
+  });
 }
 
 export function addMembers(

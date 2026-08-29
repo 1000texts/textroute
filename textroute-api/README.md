@@ -137,47 +137,85 @@ is named for what it holds under either route; pair it with `workflow_status` to
 tell which happened. `messages.routing_policy` snapshots the policy in force at
 handling time, so changing a group's policy never rewrites history.
 
-### Message graph vs conversation
+### Requests, messages, and roles
 
-`parent_message_id` is a **message relationship** edge (star: replies and
-outbound fan-out copies point at the original routed inbound). It is **not**
-a complete Conversation/Thread model — do not introduce a `conversations`
-table until product needs (active topics, who responded, resolve/summarize)
-justify it. Get the message graph right first.
+**The request is the thing with a lifecycle. Messages are events within it.**
 
-> **`parent_message_id` represents message relationship, not moderation state.**
-> A non-null parent does not by itself mean the message is exempt from
-> moderation. Finding a related original request and deciding
-> moderation/routing policy are separate concerns.
+```text
+Request  (open → completed | cancelled | expired)
+  ├── Message 1  member asks for an axe          original_request
+  ├── Message 2  copy sent to Bob                fanout_copy
+  ├── Message 3  moderator asks "which day?"     moderator_clarification
+  ├── Message 4  Bob says "I have one"           member_reply
+  └── Message 5  requester says "got it, thanks" confirmation
+```
 
-The inbound path therefore makes three separate decisions rather than one:
+`messages.request_id` expresses **parentage only**. Every message in a thread
+carries it, including the original, so it cannot tell you what a message *is*.
+Never infer a message's role from `request_id`, `parent_message_id`,
+`direction`, or timestamps.
 
-1. **Is there an original request candidate?**
-   (`find_original_request_candidate_for_member`) — sets the relationship only.
-2. **What kind of inbound message is this?** (`determine_inbound_kind` →
-   `messages.kind`) — selects the workflow.
-3. **How should a `NEW_REQUEST` be routed?** (`groups.routing_policy`) — never
-   consulted for replies.
+A message's meaning lives in two explicit columns, stamped once by whichever
+path creates the row and never re-derived:
 
-The first step is named for what the lookup *discovers* — which request reached
-this member recently — rather than for what the new message might turn out to
-be. It returns the original request itself, not the per-recipient fan-out copy
-that evidenced it, so replies parent directly to the request.
+| `sender_role` | `kind` | `member_id` | `author_member_id` |
+|---|---|---|---|
+| `member` | `original_request` | sender | = `member_id` |
+| `moderator` | `moderator_clarification` | recipient | the moderator |
+| `member` | `member_reply` | sender | = `member_id` |
+| `system` | `fanout_copy` | recipient | NULL |
+| `member` | `confirmation` | sender | = `member_id` |
 
-**Temporary scaffolding (replace before intelligent routing):**
+`member_id` keeps its established meaning — the member the row is *about* —
+while `author_member_id` answers the different question of who wrote it, and is
+NULL exactly when nobody did. These five shapes are enforced in two places:
+`build_message_role()` in `src/domain/message_role.py`, and the
+`messages_role_shape_check` constraint. Several code paths create messages, and
+a wrong pairing would quietly corrupt the meaning of a thread.
 
-- Candidate detection ≈ “member received this request within
-  `InboundMessageService.ORIGINAL_REQUEST_CANDIDATE_WINDOW_HOURS` (2h)”. A
-  candidate is a signal, not proof: time alone still false-positives, so the
-  window stays short.
-- **`REPLY` currently bypasses moderation as a slice-level behavior, not because
-  `parent_message_id` is present.** Future reply analysis may classify a message
-  as `REPLY`, `NEW_REQUEST`, or `REPLY_WITH_NEW_REQUEST` — "I have one. Also,
-  anyone have a pressure washer?" is both, and is handled today only as the
-  former. Linked replies stay at `possible_reply_persisted_unprocessed`.
+`parent_message_id` remains the message graph (a star: replies and fan-out
+copies point at the original). It is now redundant for threading, which
+`request_id` owns.
 
-Next evolution: replace `determine_inbound_kind` with a real relationship
-resolver, then reply-intent analysis — not a giant schema rewrite.
+The inbound path makes three separate decisions rather than one:
+
+1. **Which request does this belong to?** — `find_open_for_requester` (the
+   sender's own open request), then `find_open_for_participant` (one whose
+   fan-out copy names them as recipient). Both read explicit message rows.
+2. **What is this message?** — `determine_inbound_kind`, at the boundary, then
+   stamped into `kind`.
+3. **How should an `original_request` be routed?** — `groups.routing_policy`,
+   which asks `is_routable(kind)` and so can never broadcast a reply.
+
+A request's lifecycle now bounds reply collection, replacing the old two-hour
+timing window: once a request is completed, cancelled, or expired, the next
+message from those members starts a new one. `RequestService.sweep_expired`
+closes abandoned requests (default 72h) so they stop capturing unrelated
+messages.
+
+**Deliberately narrow rules (change only on purpose):**
+
+- `confirmation` is assigned only when the requester sends the inbound message
+  accompanying explicit request resolution. Other inbound messages remain
+  `member_reply` regardless of their natural-language semantics. Do not add
+  keyword detection for "thanks" or "got one" — that puts semantic inference
+  back at the boundary this design just removed it from.
+- **`member_reply` bypasses moderation as a slice-level product policy**, not
+  because it belongs to a request. A future reply-intent analyzer may find a new
+  request inside one; "I have one. Also, anyone have a pressure washer?" is both,
+  and is handled today only as a reply.
+
+### request_events
+
+Machine-generated activity — `authorized`, `delivered`, `delivery_failed`,
+`completed`, `cancelled`, `expired` — kept out of `messages` so that table stays
+human communication and the moderator thread stays readable.
+
+`delivered` and `delivery_failed` are recorded **per recipient**, each pointing
+at that recipient's fan-out copy. There is deliberately no
+`partially_delivered` event: a partial fan-out is a mix of the two, and the
+aggregate lives on `messages.workflow_status` rather than being stored in a
+second place where it could drift.
 
 ## Common endpoints
 
@@ -199,6 +237,11 @@ resolver, then reply-intent analysis — not a giant schema rewrite.
 | `GET` | `/messages/{id}` | Message detail + eligible recipients |
 | `POST` | `/messages/{id}/approve` | `{ "recipient_ids": [...] }` then fan-out |
 | `POST` | `/messages/{id}/reject` | Mark moderator_rejected |
+| `GET` | `/requests` | Requests for the group; `?status=open` to filter |
+| `GET` | `/requests/{id}` | Request + full thread + audit trail |
+| `POST` | `/requests/{id}/messages` | `{ "body": "..." }` — moderator speaks into the thread |
+| `POST` | `/requests/{id}/complete` | Requester got what they needed |
+| `POST` | `/requests/{id}/cancel` | Request withdrawn |
 | `GET` | `/` | Health |
 
 ## Workflow statuses
@@ -219,8 +262,29 @@ when the provider accepts the send (not carrier delivery confirmation).
 
 Failures: `processing_failed`, `moderator_rejected`, `delivery_failed`.
 
-Per-recipient delivery receipts (`MessageDelivery`) are a near-term follow-up;
-do not block the current moderator + SMS + fan-out slice on that model.
+Per-recipient outcomes now live in `request_events` (`delivered` /
+`delivery_failed`, one per recipient). A `MessageDelivery` model for carrier
+receipts remains a possible follow-up.
+
+## Request analysis
+
+```
+RequestAnalyzer → src/ai (LangChain + Ollama) → requests.{request_type,
+                                                summary, extracted_filters,
+                                                embedding, model_name}
+```
+
+Off by default (`REQUEST_ANALYSIS_ENABLED=false`) so a checkout with no Ollama
+running still handles inbound SMS: the keyword classifier in `MessageProcessor`
+supplies the fallback. A model failure is logged and downgraded, never raised —
+the request is the durable object, and its analysis can be recomputed.
+
+`requests.model_name` is NULL for the fallback, which is how you tell a real
+analysis from a degraded one.
+
+The embedding must be 1024-dimensional to match the column and its `ivfflat`
+index; a wrong-width vector is dropped with an error rather than stored.
+Changing `OLLAMA_EMBEDDING_MODEL` means a migration, not just an env var.
 
 ## Outbound SMS
 

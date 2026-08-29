@@ -26,10 +26,22 @@ class CreateGroupRequest(BaseModel):
     name: str
     description: str | None = None
     moderator_phone_number: str
+    moderator_name: str
 
 
 class ApproveMessageRequest(BaseModel):
     recipient_ids: list[UUID]
+
+
+class SendRequestMessageRequest(BaseModel):
+    """A moderator speaking into a request thread.
+
+    ``recipient_ids`` omitted means the requester alone, which is the usual case
+    for a clarifying question.
+    """
+
+    body: str
+    recipient_ids: list[UUID] | None = None
 
 
 class UpdateRoutingPolicyRequest(BaseModel):
@@ -83,3 +95,12 @@ class AddedMemberResponse(BaseModel):
 class AddMembersResponse(BaseModel):
     group_id: UUID
     members: list[AddedMemberResponse]
+
+
+class UpdateMemberRequest(BaseModel):
+    """A moderator's edit to one membership. All fields are sent every time."""
+
+    name: str
+    phone_number: str
+    role: Literal["member", "moderator"]
+    status: Literal["pending", "active", "declined", "removed", "opted_out"]

@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from src.core.providers.sms_provider import LoggingSmsProvider, SmsProviderError
+from src.domain.message_role import MessageKind, RequestEventType
 from src.domain.message_status import MessageWorkflowStatus
 from src.services.group_service import GroupService
 from src.services.messaging_service import MessagingService
@@ -46,6 +47,7 @@ def test_messaging_service_persists_after_provider_send():
         to_member=member,
         from_phone_number="+15559876543",
         body="Does anyone have a ladder?",
+        kind=MessageKind.FANOUT_COPY,
         parent_message_id=uuid4(),
     )
 
@@ -76,6 +78,7 @@ def test_messaging_service_provider_failure_does_not_persist():
             to_member=SimpleNamespace(id=uuid4(), phone_number="+15551112222"),
             from_phone_number="+15559876543",
             body="hi",
+            kind=MessageKind.FANOUT_COPY,
         )
     message_mgr.create_outbound.assert_not_called()
 
@@ -94,6 +97,7 @@ def test_messaging_service_unexpected_errors_are_not_wrapped():
             to_member=SimpleNamespace(id=uuid4(), phone_number="+15551112222"),
             from_phone_number="+15559876543",
             body="hi",
+            kind=MessageKind.FANOUT_COPY,
         )
     message_mgr.create_outbound.assert_not_called()
 
@@ -115,7 +119,9 @@ def test_approve_records_moderator_decision_then_delegates_fanout():
         group=SimpleNamespace(id=group_id),
         suggested_recipient_ids=[recipient_id],
         routed_recipient_ids=None,
-        kind="new_request",
+        request_id=44,
+        kind="original_request",
+        sender_role="member",
         routing_policy="moderator_required",
         intent="request_borrow",
         confidence=0.4,
@@ -150,11 +156,13 @@ def test_approve_records_moderator_decision_then_delegates_fanout():
         "delivery_failures": [],
     }
 
+    event_mgr = MagicMock()
     service = ModerationService(
         message_manager=message_mgr,
         membership_manager=membership_mgr,
         phone_number_manager=MagicMock(),
         routing_service=routing,
+        request_event_manager=event_mgr,
     )
 
     result = service.approve(
@@ -167,6 +175,13 @@ def test_approve_records_moderator_decision_then_delegates_fanout():
     # Moderator approval is recorded as APPROVED, never auto_authorized.
     assert message.workflow_status == MessageWorkflowStatus.APPROVED.value
     assert message.routed_recipient_ids == [recipient_id]
+
+    # Both routes to delivery write the same event; the payload is where the
+    # audit trail distinguishes a person from a policy.
+    event = event_mgr.record.call_args.kwargs
+    assert event["request_id"] == 44
+    assert event["event_type"] is RequestEventType.AUTHORIZED
+    assert event["payload"]["by"] == "moderator"
 
     routing.fan_out.assert_called_once()
     assert routing.fan_out.call_args.args[2] == [recipient]
@@ -228,7 +243,9 @@ def test_reject_message():
         constraints=None,
         suggested_recipient_ids=[],
         routed_recipient_ids=None,
-        kind="new_request",
+        request_id=None,
+        kind="original_request",
+        sender_role="member",
         routing_policy="moderator_required",
         parent_message_id=None,
         created_at=None,
@@ -317,10 +334,12 @@ def test_approve_ignores_the_groups_current_policy():
         workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
         # Group has since moved to auto_group; this snapshot must still govern.
         routing_policy="moderator_required",
-        kind="new_request",
+        kind="original_request",
+        sender_role="member",
         group=SimpleNamespace(id=group_id, routing_policy="auto_group"),
         suggested_recipient_ids=[recipient_id],
         routed_recipient_ids=None,
+        request_id=None,
         intent=None,
         confidence=None,
         constraints=None,

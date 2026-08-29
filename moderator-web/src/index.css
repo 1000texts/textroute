@@ -107,11 +107,45 @@ body {
   outline: none;
 }
 
-.field input::placeholder {
+.field input::placeholder,
+.field textarea::placeholder {
   color: #8a8a8a;
 }
 
-.field input:focus {
+.field textarea {
+  width: 100%;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--fg);
+  padding: 0.7rem 0.85rem;
+  font: inherit;
+  outline: none;
+  resize: vertical;
+}
+
+.field textarea:focus {
+  box-shadow: 0 0 0 1px var(--fg);
+}
+
+.field select {
+  width: 100%;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--fg);
+  padding: 0.7rem 0.85rem;
+  font: inherit;
+  outline: none;
+}
+
+/* The native menu inherits the page background, which is unreadable on a
+   dark theme in some browsers. */
+.field select option {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.field input:focus,
+.field select:focus {
   box-shadow: 0 0 0 1px var(--fg);
 }
 
@@ -281,6 +315,22 @@ body {
   font-size: 0.9rem;
 }
 
+.member-inactive .member-name,
+.member-inactive .member-phone,
+.member-inactive .member-meta {
+  opacity: 0.55;
+}
+
+.member-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.member-actions .text-button {
+  margin: 0;
+}
+
 .queue-list,
 .recipient-list {
   list-style: none;
@@ -321,6 +371,30 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.thread {
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* A thread reads as a conversation, so bodies wrap rather than truncate the
+   way they do in the flat message feed. */
+.thread-message {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  border-left: 1px solid var(--fg);
+  padding-left: 0.85rem;
+}
+
+.thread-message .queue-body {
+  white-space: pre-wrap;
+  overflow: visible;
 }
 
 .message-body {
@@ -445,6 +519,297 @@ body {
   text-decoration: underline;
 }
 
+/* ---------------------------------------------------------------------------
+   Request workbench: a list of workflows beside the one being worked on.
+   --------------------------------------------------------------------------- */
+
+.workbench {
+  width: min(1180px, 100%);
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+/* .section-label is sized for the single-column pages; inside a pane it must
+   take the pane's width instead. */
+.workbench .section-label {
+  width: auto;
+  margin-top: 0;
+}
+
+.pane-heading {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.request-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* Needs Review is not a request status, so it is deliberately not one of the
+   lifecycle chips: a request can be open with or without it. */
+.review-filter {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid #333;
+  color: #ffcf8b;
+  font: inherit;
+  padding: 0.7rem 0.85rem;
+  cursor: pointer;
+}
+
+.review-filter.active,
+.review-filter:hover {
+  border-color: #ffcf8b;
+}
+
+.review-filter.empty {
+  color: var(--muted);
+}
+
+.lifecycle-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.status-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.status-group-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.request-card {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid #333;
+  color: var(--fg);
+  font: inherit;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.request-card.active,
+.request-card:hover {
+  border-color: var(--fg);
+}
+
+.request-card.attention {
+  border-left: 2px solid #ffcf8b;
+}
+
+.request-card-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.request-card-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.request-block {
+  border: 1px solid #333;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.request-block:last-child {
+  margin-bottom: 0;
+}
+
+.request-id {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.request-title {
+  margin: 0.3rem 0 0.75rem;
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.lifecycle-step.current {
+  color: var(--fg);
+}
+
+.lifecycle-step.done {
+  color: #a5e0a5;
+}
+
+.request-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.4rem 1.5rem;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.request-facts dt {
+  color: var(--muted);
+}
+
+.request-facts dd {
+  margin: 0;
+}
+
+/* A routing operation, collapsed. Not a message, so it never reads as one. */
+.routing-block {
+  border: 1px dashed #4a4a4a;
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.routing-summary {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.routing-summary:hover {
+  color: var(--fg);
+}
+
+.routing-recipients {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+}
+
+.routing-recipient {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.routing-recipient .outcome {
+  color: var(--muted);
+}
+
+.routing-recipient.failed .outcome {
+  color: #ffb4b4;
+}
+
+.routing-recipient.delivered .outcome {
+  color: #a5e0a5;
+}
+
+.speaker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.speaker-name {
+  color: var(--fg);
+}
+
+.speaker-time,
+.speaker-kind {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.activity-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.activity-item .activity-time {
+  color: var(--muted);
+}
+
+.activity-item.failed {
+  color: #ffb4b4;
+}
+
+/* The one block in the pane that asks for a decision, so it is outlined. */
+.needs-review-block {
+  border: 1px solid #ffcf8b;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.needs-review-block .section-label {
+  color: #ffcf8b;
+  margin-top: 0;
+}
+
+.recipient-choices {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+@media (max-width: 900px) {
+  .workbench {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+}
+
 @media (max-width: 640px) {
   .member-row {
     grid-template-columns: 1fr;
@@ -453,5 +818,14 @@ body {
   .remove-member {
     justify-self: start;
     padding: 0;
+  }
+
+  .request-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.1rem;
+  }
+
+  .request-facts dd {
+    margin-bottom: 0.5rem;
   }
 }

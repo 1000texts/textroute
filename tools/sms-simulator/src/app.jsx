@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
 
@@ -9,6 +9,10 @@ const WEBHOOK_SECRET = import.meta.env.VITE_WEBHOOK_SECRET
 
 const STORAGE_KEY_FROM = 'sms-simulator.from'
 const STORAGE_KEY_TO = 'sms-simulator.to'
+const STORAGE_KEY_RECENT_FROM = 'sms-simulator.recent-from'
+const STORAGE_KEY_RECENT_TO = 'sms-simulator.recent-to'
+
+const MAX_RECENT = 10
 
 // localStorage throws in private-browsing modes, so fall back to the default.
 function loadStoredNumber(key, fallback) {
@@ -27,6 +31,35 @@ function storeNumber(key, value) {
     }
 }
 
+// Anything could be sitting under these keys -- a half-written value, or a
+// string from an older build -- so validate rather than trust the shape.
+function loadStoredNumbers(key) {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(key))
+        if (!Array.isArray(parsed)) return []
+        return parsed
+            .filter(value => typeof value === 'string' && value.trim())
+            .slice(0, MAX_RECENT)
+    } catch {
+        return []
+    }
+}
+
+function storeNumbers(key, values) {
+    try {
+        localStorage.setItem(key, JSON.stringify(values))
+    } catch {
+        // Without storage the list still works, just for this session only.
+    }
+}
+
+// Most recent first, no duplicates, capped.
+function addRecentNumber(values, value) {
+    const trimmed = value.trim()
+    if (!trimmed) return values
+    return [trimmed, ...values.filter(v => v !== trimmed)].slice(0, MAX_RECENT)
+}
+
 function initialsFromNumber(value) {
     const digits = String(value).replace(/\D/g, '')
     if (digits.length >= 2) return digits.slice(-2)
@@ -40,9 +73,24 @@ export default function App() {
     const [to, setTo] = useState(() =>
         loadStoredNumber(STORAGE_KEY_TO, '+15559876543')
     )
+    const [recentFrom, setRecentFrom] = useState(() =>
+        loadStoredNumbers(STORAGE_KEY_RECENT_FROM)
+    )
+    const [recentTo, setRecentTo] = useState(() =>
+        loadStoredNumbers(STORAGE_KEY_RECENT_TO)
+    )
     const [body, setBody] = useState('')
     const [messages, setMessages] = useState([])
     const [loading, setLoading] = useState(false) // new state for progress indicator
+    const chatRef = useRef(null)
+
+    // Follow the conversation down as it grows. The typewriter rewrites the last
+    // message on every tick, so this also keeps a long reply in view while it
+    // types rather than only once it finishes.
+    useEffect(() => {
+        const chat = chatRef.current
+        if (chat) chat.scrollTop = chat.scrollHeight
+    }, [messages])
 
     useEffect(() => {
         storeNumber(STORAGE_KEY_FROM, from)
@@ -51,6 +99,18 @@ export default function App() {
     useEffect(() => {
         storeNumber(STORAGE_KEY_TO, to)
     }, [to])
+
+    // Called once the webhook has accepted the message, so the lists only ever
+    // fill up with pairs that actually reached a group.
+    function rememberNumbers() {
+        const nextFrom = addRecentNumber(recentFrom, from)
+        setRecentFrom(nextFrom)
+        storeNumbers(STORAGE_KEY_RECENT_FROM, nextFrom)
+
+        const nextTo = addRecentNumber(recentTo, to)
+        setRecentTo(nextTo)
+        storeNumbers(STORAGE_KEY_RECENT_TO, nextTo)
+    }
 
     async function sendMessage() {
         if (!body.trim()) return
@@ -80,6 +140,7 @@ export default function App() {
                 }
             )
 
+            rememberNumbers()
             typeWriter(res.data)
         } catch (err) {
             const message =
@@ -147,13 +208,23 @@ export default function App() {
                         </span>
                         <div className="nav-contact">
                             <div className="avatar" aria-hidden="true">{initialsFromNumber(to)}</div>
+                            {/* datalist rather than a select: it keeps these
+                                exact inputs, so the nav bar keeps its size,
+                                and typing an unlisted number is still just
+                                typing. */}
                             <label className="contact-name">
                                 <span className="sr-only">Receiver</span>
                                 <input
                                     value={to}
                                     onChange={e => setTo(e.target.value)}
                                     aria-label="Receiver"
+                                    list="recent-to"
                                 />
+                                <datalist id="recent-to">
+                                    {recentTo.map(number => (
+                                        <option key={number} value={number} />
+                                    ))}
+                                </datalist>
                             </label>
                             <label className="contact-from">
                                 <span>From</span>
@@ -161,7 +232,13 @@ export default function App() {
                                     value={from}
                                     onChange={e => setFrom(e.target.value)}
                                     aria-label="Sender"
+                                    list="recent-from"
                                 />
+                                <datalist id="recent-from">
+                                    {recentFrom.map(number => (
+                                        <option key={number} value={number} />
+                                    ))}
+                                </datalist>
                             </label>
                         </div>
                         <span className="nav-info" aria-hidden="true">
@@ -173,7 +250,7 @@ export default function App() {
                     </div>
 
                     <div className="container">
-                        <div className="chat">
+                        <div className="chat" ref={chatRef}>
                             {messages.length === 0 && (
                                 <div className="empty-state">
                                     <div className="empty-avatar" aria-hidden="true">{initialsFromNumber(to)}</div>

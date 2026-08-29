@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Text,
@@ -68,8 +69,13 @@ class Requests(Base):
         server_default=text("'{}'::jsonb"),
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How sure the analyzer was about request_type. Nullable rather than
+    # defaulted: no analysis and a genuinely unsure answer are different facts.
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 1024 matches the configured Qwen3 embedding model. Changing model means
+    # changing this and reindexing; ivfflat needs a fixed dimension.
     embedding: Mapped[list[float] | None] = mapped_column(
-        Vector(1536),
+        Vector(1024),
         nullable=True,
     )
     schema_version: Mapped[int] = mapped_column(
@@ -96,6 +102,7 @@ class Requests(Base):
         nullable=True,
     )
 
+    group = relationship("Group")
     requester = relationship(
         "Member",
         back_populates="requests",
@@ -110,6 +117,11 @@ class Requests(Base):
         foreign_keys=[original_message_id],
         post_update=True,
     )
+    events = relationship(
+        "RequestEvent",
+        back_populates="request",
+        order_by="RequestEvent.created_at",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -119,5 +131,9 @@ class Requests(Base):
         CheckConstraint(
             "jsonb_typeof(extracted_filters) = 'object'",
             name="requests_extracted_filters_is_object",
+        ),
+        CheckConstraint(
+            "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+            name="requests_confidence_range",
         ),
     )

@@ -10,6 +10,8 @@ from src.core.managers.group_manager import GroupManager
 from src.core.managers.membership_manager import MembershipManager
 from src.core.managers.message_manager import MessageManager
 from src.core.managers.phone_number_manager import PhoneNumberManager
+from src.core.managers.request_event_manager import RequestEventManager
+from src.core.managers.request_manager import RequestManager
 
 __all__ = [
     "AuthManager",
@@ -17,4 +19,6 @@ __all__ = [
     "MembershipManager",
     "MessageManager",
     "PhoneNumberManager",
+    "RequestEventManager",
+    "RequestManager",
 ]

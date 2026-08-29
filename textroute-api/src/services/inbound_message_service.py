@@ -1,17 +1,21 @@
-"""Inbound SMS use case: resolve context → durable persist → determine kind → route.
+"""Inbound SMS use case: resolve context → attach to a request → persist → route.
 
 Entry: ``POST /webhook/messages`` (and ``/webhook/inbound``). A new request is
 either queued for a moderator or, when the group's routing policy authorizes it,
-routed automatically. Replies are persisted and linked but never re-routed.
+routed automatically. Replies are persisted into the request they answer but
+never re-routed.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.managers.membership_manager import MembershipManager
 from src.core.managers.message_manager import MessageManager
+from src.core.managers.request_event_manager import RequestEventManager
+from src.core.managers.request_manager import RequestManager
 from src.core.processors.message_processor import (
     MessageProcessor,
     ProcessingResult,
@@ -19,10 +23,16 @@ from src.core.processors.message_processor import (
 )
 from src.core.phone_normalize import normalize_phone_number
 from src.core.managers.phone_number_manager import PhoneNumberManager
-from src.domain.message_kind import InboundMessageKind, determine_inbound_kind
+from src.core.providers.request_analyzer import RequestAnalysis, RequestAnalyzer
+from src.domain.message_role import (
+    MessageKind,
+    RequestEventType,
+    determine_inbound_kind,
+    is_routable,
+)
 from src.domain.message_status import MessageWorkflowStatus
 from src.domain.routing_policy import requires_moderation
-from src.models import Group, Member, Message, PhoneNumber
+from src.models import Group, Member, Message, PhoneNumber, Requests
 from src.services.routing_service import RoutingService
 from src.services.inbound_errors import (
     DuplicateInboundMessageError,
@@ -36,32 +46,36 @@ logger = logging.getLogger(__name__)
 
 
 class InboundMessageService:
-    """Coordinates inbound SMS: resolve → persist → determine kind → route.
+    """Coordinates inbound SMS: resolve → attach to a request → persist → route.
 
     Three separate decisions, deliberately not collapsed into one:
-    1. Is there an original request *candidate*? (timing) — sets the relationship.
-    2. What kind of inbound message is this? — selects the workflow.
-    3. How should a NEW_REQUEST be routed? — the group's routing policy.
+    1. Which request does this belong to? — parentage, decided from explicit
+       message records (an open request the sender owns, or one whose fan-out
+       copy names them as recipient).
+    2. What is this message? — stamped once into ``kind`` at ingress.
+    3. How should an ``original_request`` be routed? — the group's policy.
 
-    ``parent_message_id`` represents message relationship, not moderation state.
-    A non-null parent does not by itself exempt a message from moderation.
+    The second never follows from the first. ``request_id`` is parentage and
+    nothing else: every message in a thread carries it, including the original,
+    so it cannot say what a message is. Routing asks ``kind`` alone.
 
     Transaction boundary (intentional):
-    1. Resolve + create inbound Message (``received``), then ``db.commit()``.
-       The original SMS must survive later processor failures.
-    2. Process + store suggestions + kind/policy snapshot, then commit again.
-       On processing failure: rollback of the *second* unit of work only, then
-       mark the inbound row ``processing_failed`` in a third short commit.
+    1. Resolve, create-or-find the Request, create the inbound Message
+       (``received``), then ``db.commit()``. The original SMS must survive later
+       processor failures.
+    2. Process + store suggestions + policy snapshot, then commit again. On
+       processing failure: rollback of the *second* unit of work only, then mark
+       the inbound row ``processing_failed`` in a third short commit.
     3. Under ``AUTO_GROUP`` only: authorize routing, commit, then fan out.
 
     ``MessageProcessor`` only recommends. Fan-out happens here solely when a
     group policy authorizes it — never for replies, and never as approval.
     """
 
-    # How recently a member must have received a request for it to count as a
-    # candidate for their next inbound. Kept short on purpose: the longer the
-    # window, the more unrelated new requests get mislabelled as replies.
-    ORIGINAL_REQUEST_CANDIDATE_WINDOW_HOURS = 2
+    # How long a request stays open before the expiry sweep closes it. A
+    # neighbourhood favour that nobody has answered in three days is stale, and
+    # leaving it open would keep capturing unrelated messages as replies.
+    REQUEST_EXPIRES_AFTER = timedelta(hours=72)
 
     def __init__(
         self,
@@ -70,14 +84,21 @@ class InboundMessageService:
         message_manager: MessageManager | None = None,
         message_processor: MessageProcessor | None = None,
         routing_service: RoutingService | None = None,
+        request_manager: RequestManager | None = None,
+        request_event_manager: RequestEventManager | None = None,
+        request_analyzer: RequestAnalyzer | None = None,
     ):
         self.phone_number_manager = phone_number_manager or PhoneNumberManager()
         self.membership_manager = membership_manager or MembershipManager()
         self.message_manager = message_manager or MessageManager()
         self.message_processor = message_processor or MessageProcessor()
+        self.request_manager = request_manager or RequestManager()
+        self.request_event_manager = request_event_manager or RequestEventManager()
+        self.request_analyzer = request_analyzer or RequestAnalyzer()
         self.routing_service = routing_service or RoutingService(
             message_manager=self.message_manager,
             phone_number_manager=self.phone_number_manager,
+            request_event_manager=self.request_event_manager,
         )
 
     def handle_incoming_message(
@@ -119,30 +140,37 @@ class InboundMessageService:
             db, member, group
         )  # if member is not active, raise an error
 
-        # Step 1 of 3: which original request did this member recently receive?
-        # This sets the *relationship* only — it decides nothing about
-        # moderation, and it does not yet claim the new message is a reply.
-        #
-        # The candidate is the original request itself, not the per-recipient
-        # fan-out copy, so every reply hangs off the one request (a star, not a
-        # chain of copies).
-        parent_message_id = None
-        original_request_candidate = (
-            self.message_manager.find_original_request_candidate_for_member(
-                db,
-                group_id=group.id,
-                member_id=member.id,
-                within_hours=self.ORIGINAL_REQUEST_CANDIDATE_WINDOW_HOURS,
-            )
+        # Step 1 of 3: which request does this belong to? Parentage only. Both
+        # lookups read explicit message records — an open request this member
+        # owns, or one whose fan-out copy names them as its recipient — so the
+        # answer never depends on a clock.
+        existing_request = self._find_open_request(db, group=group, member=member)
+
+        # Step 2 of 3: decide what this message *is*, once, here. Everything
+        # downstream reads the stamped column rather than working it out again.
+        kind = determine_inbound_kind(joins_open_request=existing_request is not None)
+
+        request = existing_request or self.request_manager.create(
+            db,
+            group_id=group.id,
+            requester_id=member.id,
+            expires_at=datetime.now(timezone.utc) + self.REQUEST_EXPIRES_AFTER,
         )
-        if original_request_candidate is not None:
-            parent_message_id = original_request_candidate.id
+
+        # A reply hangs off the request's original message, keeping the star
+        # topology. The edge is now redundant for threading, which request_id
+        # owns, but it remains the message graph.
+        parent_message_id = (
+            request.original_message_id if existing_request is not None else None
+        )
 
         try:
             message = self.message_manager.create_inbound(
                 db,
                 group_id=group.id,
                 member_id=member.id,
+                kind=kind,
+                request_id=request.id,
                 from_phone_number=from_phone_number,
                 to_phone_number=to_phone_number,
                 body=body,
@@ -167,53 +195,88 @@ class InboundMessageService:
                 extra={"message_id": str(existing.id)},
             )
             raise DuplicateInboundMessageError(str(existing.id)) from None
+
+        if existing_request is None:
+            # Deferred FK: the two rows point at each other, so the request's
+            # original message can only be named once the message exists.
+            self.request_manager.set_original_message(db, request, message.id)
+
         db.commit()
         logger.info(
             "inbound_message_created",
-            extra={"message_id": str(message.id), "group_id": str(group.id)},
+            extra={
+                "message_id": str(message.id),
+                "group_id": str(group.id),
+                "request_id": request.id,
+                "kind": kind.value,
+            },
         )
 
-        # Step 2 of 3: decide what this message *is*. Dispatch on kind, never on
-        # `parent_message_id` — a relationship is not a moderation decision.
-        kind = determine_inbound_kind(
-            has_original_request_candidate=original_request_candidate is not None
-        )
-        if kind is InboundMessageKind.REPLY:
-            return self._handle_reply(db, message=message, group=group, member=member)
+        # Dispatch on the stamped kind through the one predicate that decides
+        # what a routing policy may act on. Anything not routable is recorded
+        # into its request and left alone.
+        if not is_routable(kind):
+            return self._handle_member_reply(
+                db, message=message, group=group, member=member, request=request
+            )
         return self._handle_new_request(
-            db, message=message, group=group, member=member
+            db, message=message, group=group, member=member, request=request
         )
 
-    def _handle_reply(
+    def _find_open_request(
+        self,
+        db: Session,
+        *,
+        group: Group,
+        member: Member,
+    ) -> Requests | None:
+        """The live request this message belongs to, if any.
+
+        Two explicit lookups, in order: the sender's own open request (their
+        follow-up), then any open request whose fan-out copy was addressed to
+        them (their answer to someone else's). Both read message rows and
+        columns, which is what replaced the old two-hour timing window: a
+        request's lifecycle now says how long it can gather replies.
+        """
+        own = self.request_manager.find_open_for_requester(
+            db,
+            group_id=group.id,
+            requester_id=member.id,
+        )
+        if own is not None:
+            return own
+        return self.request_manager.find_open_for_participant(
+            db,
+            group_id=group.id,
+            member_id=member.id,
+        )
+
+    def _handle_member_reply(
         self,
         db: Session,
         *,
         message: Message,
         group: Group,
         member: Member,
+        request: Requests,
     ) -> dict:
-        """Persist and link a reply; do not re-route it.
+        """Record a reply into its request; do not re-route it.
 
-        Replies bypass moderation as a **slice-level product policy**, not because
-        ``parent_message_id`` is set. Being a reply does not mean "no moderator
-        ever needs to see this" — it means TextRoute does not re-route replies
-        yet. Future reply analysis may classify a message as ``REPLY``,
-        ``NEW_REQUEST``, or ``REPLY_WITH_NEW_REQUEST``; today "I have one. Also,
-        anyone have a pressure washer?" is handled only as the former.
+        Replies bypass moderation as a **slice-level product policy**, not
+        because they belong to a request. Being a reply does not mean "no
+        moderator ever needs to see this" — it means TextRoute does not re-route
+        replies yet. A future reply-intent analyzer may find a new request
+        inside one; today "I have one. Also, anyone have a pressure washer?" is
+        handled only as a reply.
 
-        The group routing policy is deliberately *not* consulted here, so
+        The group routing policy is deliberately not consulted here, so
         ``AUTO_GROUP`` can never broadcast a reply to the whole group.
         """
-        self.message_manager.record_routing_context(
-            db,
-            message,
-            kind=InboundMessageKind.REPLY.value,
-        )
         self.message_manager.set_workflow_status(
             db,
             message,
             MessageWorkflowStatus.RECEIVED.value,
-            processing_notes="possible_reply_persisted_unprocessed",
+            processing_notes="reply_recorded_unprocessed",
         )
         db.commit()
         return {
@@ -221,10 +284,13 @@ class InboundMessageService:
             "message_id": str(message.id),
             "group_id": str(group.id),
             "member_id": str(member.id),
-            "kind": InboundMessageKind.REPLY.value,
+            "request_id": request.id,
+            "kind": MessageKind.MEMBER_REPLY.value,
             "workflow_status": message.workflow_status,
-            "processing": "possible_reply_persisted",
-            "parent_message_id": str(message.parent_message_id),
+            "processing": "reply_recorded",
+            "parent_message_id": (
+                str(message.parent_message_id) if message.parent_message_id else None
+            ),
         }
 
     def _handle_new_request(
@@ -234,21 +300,22 @@ class InboundMessageService:
         message: Message,
         group: Group,
         member: Member,
+        request: Requests,
     ) -> dict:
-        """Classify, then route per the group's policy."""
+        """Analyze the request, then route per the group's policy."""
         try:
             result = self._process_for_moderation(
                 db,
                 message=message,
                 group=group,
                 member=member,
+                request=request,
             )
             # Step 3 of 3: how should this new request be routed? Snapshot the
             # policy in force so later policy changes cannot rewrite history.
-            self.message_manager.record_routing_context(
+            self.message_manager.record_routing_policy(
                 db,
                 message,
-                kind=InboundMessageKind.NEW_REQUEST.value,
                 routing_policy=group.routing_policy,
             )
             db.commit()
@@ -272,7 +339,8 @@ class InboundMessageService:
             return {
                 "status": "persisted",
                 "message_id": str(message_id),
-                "kind": InboundMessageKind.NEW_REQUEST.value,
+                "request_id": request.id,
+                "kind": MessageKind.ORIGINAL_REQUEST.value,
                 "processing": "failed",
                 "workflow_status": MessageWorkflowStatus.PROCESSING_FAILED.value,
             }
@@ -282,7 +350,8 @@ class InboundMessageService:
             "message_id": str(message.id),
             "group_id": str(group.id),
             "member_id": str(member.id),
-            "kind": InboundMessageKind.NEW_REQUEST.value,
+            "request_id": request.id,
+            "kind": MessageKind.ORIGINAL_REQUEST.value,
             "routing_policy": group.routing_policy,
             "workflow_status": message.workflow_status,
             "intent": result.intent,
@@ -297,6 +366,7 @@ class InboundMessageService:
             db,
             message=message,
             group=group,
+            request=request,
             suggested_recipient_ids=result.suggested_recipient_ids,
             response=response,
         )
@@ -307,6 +377,7 @@ class InboundMessageService:
         *,
         message: Message,
         group: Group,
+        request: Requests,
         suggested_recipient_ids: list,
         response: dict,
     ) -> dict:
@@ -334,6 +405,16 @@ class InboundMessageService:
             db,
             message,
             routed_recipient_ids=[m.id for m in recipients],
+        )
+        self.request_event_manager.record(
+            db,
+            request_id=request.id,
+            event_type=RequestEventType.AUTHORIZED,
+            message_id=message.id,
+            payload={
+                "by": "policy_auto_group",
+                "recipient_ids": [str(m.id) for m in recipients],
+            },
         )
         db.commit()
 
@@ -437,8 +518,9 @@ class InboundMessageService:
         message: Message,
         group: Group,
         member: Member,
+        request: Requests,
     ) -> ProcessingResult:
-        """Heuristic suggestions only — moderator still chooses recipients."""
+        """Suggestions only — moderator still chooses recipients."""
         self.message_manager.set_workflow_status(
             db,
             message,
@@ -462,12 +544,40 @@ class InboundMessageService:
             candidates=candidates,
         )
 
+        # Describe the request on the request itself. Recipients come from the
+        # processor above; the analyzer only says what is being asked for, and
+        # falls back to those same keyword results when the model is unavailable.
+        analysis = self.request_analyzer.analyze(
+            message.body,
+            fallback=RequestAnalysis(
+                request_type=result.intent,
+                summary=message.body[:140],
+                extracted_filters=result.constraints or {},
+                confidence=result.confidence,
+                notes="keyword_fallback",
+            ),
+        )
+        self.request_manager.apply_analysis(
+            db,
+            request,
+            request_type=analysis.request_type,
+            extracted_filters=analysis.extracted_filters,
+            summary=analysis.summary,
+            embedding=analysis.embedding,
+            model_name=analysis.model_name,
+            confidence=analysis.confidence,
+        )
+
+        # The message records the analysis that drove *this* routing decision,
+        # while the request carries the current best understanding. They can
+        # diverge if a request is re-analyzed, which is the point of keeping
+        # both.
         self.message_manager.apply_processing_result(
             db,
             message,
-            intent=result.intent,
-            constraints=result.constraints or None,
-            confidence=result.confidence,
+            intent=analysis.request_type,
+            constraints=analysis.extracted_filters or None,
+            confidence=analysis.confidence,
             suggested_recipient_ids=result.suggested_recipient_ids,
             notes=result.notes,
             workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,

@@ -26,12 +26,24 @@ class MembershipManager:
         self,
         db: Session,
         phone_number: str,
+        name: str | None = None,
     ) -> Member:
+        """Find the member for this number, creating one if needed.
+
+        ``name`` fills ``members.name`` on creation, and backfills it for a
+        member who has none. It never replaces an existing name: the same
+        person may be enrolled by someone else later, and a stale or careless
+        entry should not silently rename them.
+        """
         normalized = normalize_phone_number(phone_number)
         member = self.get_by_phone(db, normalized)
 
         if member is None:
-            member = Member(phone_number=normalized)
+            member = Member(phone_number=normalized, name=name)
+            db.add(member)
+            db.flush()
+        elif name and not member.name:
+            member.name = name
             db.add(member)
             db.flush()
 
@@ -65,6 +77,44 @@ class MembershipManager:
                 GroupMembership.status == "active",
             )
             .all()
+        )
+
+    def list_memberships(
+        self,
+        db: Session,
+        group_id: UUID,
+    ) -> list[GroupMembership]:
+        """Every membership in the group, whatever its status.
+
+        The moderator directory needs the non-active rows too, otherwise a
+        member who was removed becomes invisible and unreactivatable. Routing
+        must keep using ``list_active_memberships``.
+        """
+        return (
+            db.query(GroupMembership)
+            .filter(GroupMembership.group_id == group_id)
+            .all()
+        )
+
+    def get_membership_by_id(
+        self,
+        db: Session,
+        *,
+        membership_id: UUID,
+        group_id: UUID,
+    ) -> GroupMembership | None:
+        """Load one membership, scoped to the group.
+
+        ``group_id`` comes from the session, so passing it here is what stops a
+        moderator from reaching a membership in someone else's group by id.
+        """
+        return (
+            db.query(GroupMembership)
+            .filter(
+                GroupMembership.id == membership_id,
+                GroupMembership.group_id == group_id,
+            )
+            .first()
         )
 
     def get_membership(

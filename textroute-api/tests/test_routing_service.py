@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from src.core.providers.sms_provider import SmsProviderError
+from src.domain.message_role import MessageKind
 from src.domain.message_status import MessageWorkflowStatus
 from src.services.routing_service import RoutingError, RoutingService
 
@@ -16,6 +17,7 @@ def _message(status: str, group_id, **overrides):
         id=uuid4(),
         group_id=group_id,
         member_id=uuid4(),
+        request_id=42,
         body="Does anyone have a ladder?",
         workflow_status=status,
         group=SimpleNamespace(id=group_id),
@@ -43,6 +45,10 @@ def _managers():
     return message_mgr, phone_mgr
 
 
+def _recorded_events(event_mgr) -> list[str]:
+    return [c.kwargs["event_type"].value for c in event_mgr.record.call_args_list]
+
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -62,18 +68,29 @@ def test_fan_out_accepts_both_routes_to_delivery(status):
     outbound = SimpleNamespace(id=uuid4())
     messaging.send_message.return_value = outbound
 
+    event_mgr = MagicMock()
     service = RoutingService(
         message_manager=message_mgr,
         phone_number_manager=phone_mgr,
         messaging_service=messaging,
+        request_event_manager=event_mgr,
     )
     result = service.fan_out(db, message, [recipient])
 
     assert message.workflow_status == MessageWorkflowStatus.DELIVERED.value
     assert result["delivered_outbound_ids"] == [str(outbound.id)]
-    # The inbound body is forwarded unchanged, parented to the original request.
-    assert messaging.send_message.call_args.kwargs["body"] == message.body
-    assert messaging.send_message.call_args.kwargs["parent_message_id"] == message.id
+    # The inbound body is forwarded unchanged, parented to the original request
+    # and carried into the same request thread.
+    sent = messaging.send_message.call_args.kwargs
+    assert sent["body"] == message.body
+    assert sent["parent_message_id"] == message.id
+    assert sent["request_id"] == message.request_id
+    # A copy is a system artefact: recipient in member_id, nobody as author.
+    assert sent["kind"] is MessageKind.FANOUT_COPY
+    assert sent["to_member"] is recipient
+    assert sent.get("author_member_id") is None
+
+    assert _recorded_events(event_mgr) == ["delivered"]
 
 
 def test_fan_out_rejects_message_not_cleared_for_delivery():
@@ -110,16 +127,26 @@ def test_fan_out_partial_failure_sets_partially_delivered():
 
     messaging.send_message.side_effect = send_message
 
+    event_mgr = MagicMock()
     service = RoutingService(
         message_manager=message_mgr,
         phone_number_manager=phone_mgr,
         messaging_service=messaging,
+        request_event_manager=event_mgr,
     )
     result = service.fan_out(db, message, [good, bad])
 
     assert message.workflow_status == MessageWorkflowStatus.PARTIALLY_DELIVERED.value
     assert result["delivered_outbound_ids"] == [str(outbound.id)]
     assert len(result["delivery_failures"]) == 1
+
+    # A partial fan-out is a mix of per-recipient outcomes, never its own event
+    # type: the aggregate lives on the message and is not stored twice.
+    assert _recorded_events(event_mgr) == ["delivered", "delivery_failed"]
+    failed = event_mgr.record.call_args_list[1].kwargs
+    assert failed["payload"]["member_id"] == str(bad.id)
+    # Nothing was sent, so there is no outbound row for the event to point at.
+    assert failed["message_id"] is None
 
 
 def test_fan_out_total_failure_sets_delivery_failed():
@@ -132,16 +159,19 @@ def test_fan_out_total_failure_sets_delivery_failed():
     messaging = MagicMock()
     messaging.send_message.side_effect = SmsProviderError("provider down")
 
+    event_mgr = MagicMock()
     service = RoutingService(
         message_manager=message_mgr,
         phone_number_manager=phone_mgr,
         messaging_service=messaging,
+        request_event_manager=event_mgr,
     )
     result = service.fan_out(db, message, [recipient])
 
     assert message.workflow_status == MessageWorkflowStatus.DELIVERY_FAILED.value
     assert result["delivered_outbound_ids"] == []
     assert len(result["delivery_failures"]) == 1
+    assert _recorded_events(event_mgr) == ["delivery_failed"]
 
 
 def test_fan_out_requires_assigned_group_number():

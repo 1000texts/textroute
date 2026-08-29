@@ -4,6 +4,7 @@ export type CreateGroupPayload = {
   name: string;
   description: string | null;
   moderator_phone_number: string;
+  moderator_name: string;
 };
 
 export type GroupResponse = {
@@ -12,6 +13,7 @@ export type GroupResponse = {
   description: string | null;
   status: string;
   moderator_member_id: string;
+  moderator_name: string | null;
   phone_number: string;
 };
 

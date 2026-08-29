@@ -1,8 +1,8 @@
-from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from src.domain.message_role import MessageKind, build_message_role
 from src.domain.message_status import MessageWorkflowStatus
 from src.models import Message
 
@@ -48,50 +48,14 @@ class MessageManager:
             query = query.filter(Message.workflow_status.in_(statuses))
         return query.order_by(Message.created_at.desc()).limit(limit).all()
 
-    def find_original_request_candidate_for_member(
-        self,
-        db: Session,
-        *,
-        group_id: UUID,
-        member_id: UUID,
-        within_hours: int = 2,
-    ) -> Message | None:
-        """Return the original request this member most recently received, if any.
-
-        Named for what the lookup *discovers* — which request reached this member
-        recently — rather than for what their next message might be. It is a
-        candidate, not proof: timing alone cannot tell "I have an axe" from an
-        unrelated "what time is the meeting?", so the window is deliberately
-        short to keep false positives rare rather than merely likely.
-
-        Real conversation detection belongs in a future
-        ``MessageRelationshipResolver`` (timing + recipient history + semantics,
-        LLM when ambiguous). Don't grow this into that.
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=within_hours)
-        recent_fanout = (
-            db.query(Message)
-            .filter(
-                Message.group_id == group_id,
-                Message.member_id == member_id,
-                Message.direction == "outbound",
-                Message.parent_message_id.isnot(None),
-                Message.created_at >= cutoff,
-            )
-            .order_by(Message.created_at.desc())
-            .first()
-        )
-        if recent_fanout is None:
-            return None
-        # The fan-out copy is the evidence; its parent is the request itself.
-        return recent_fanout.parent
-
     def create_inbound(
         self,
         db: Session,
         *,
         group_id: UUID,
         member_id: UUID,
+        kind: MessageKind,
+        request_id: int | None = None,
         from_phone_number: str,
         to_phone_number: str,
         body: str,
@@ -99,10 +63,14 @@ class MessageManager:
         parent_message_id: UUID | None = None,
         workflow_status: str = MessageWorkflowStatus.RECEIVED.value,
     ) -> Message:
-        """Insert an inbound message. Caller handles duplicates / commit."""
+        """Insert an inbound message. Caller handles duplicates / commit.
+
+        ``kind`` is required: a message's role is stamped when the row is made,
+        never worked out later from ``request_id`` or timing.
+        """
         message = Message(
             group_id=group_id,
-            member_id=member_id,
+            request_id=request_id,
             parent_message_id=parent_message_id,
             direction="inbound",
             from_phone_number=from_phone_number,
@@ -110,6 +78,7 @@ class MessageManager:
             body=body,
             provider_message_id=provider_message_id,
             workflow_status=workflow_status,
+            **build_message_role(kind=kind, member_id=member_id),
         )
         db.add(message)
         db.flush()
@@ -121,6 +90,9 @@ class MessageManager:
         *,
         group_id: UUID,
         member_id: UUID | None,
+        kind: MessageKind,
+        author_member_id: UUID | None = None,
+        request_id: int | None = None,
         from_phone_number: str,
         to_phone_number: str,
         body: str,
@@ -128,9 +100,15 @@ class MessageManager:
         parent_message_id: UUID | None = None,
         workflow_status: str = MessageWorkflowStatus.SENT.value,
     ) -> Message:
+        """Insert an outbound message.
+
+        ``member_id`` is the recipient. ``author_member_id`` is whoever wrote
+        it, and must be NULL for a fan-out copy, which the system generates
+        from a body someone else already wrote.
+        """
         message = Message(
             group_id=group_id,
-            member_id=member_id,
+            request_id=request_id,
             parent_message_id=parent_message_id,
             direction="outbound",
             from_phone_number=from_phone_number,
@@ -138,6 +116,11 @@ class MessageManager:
             body=body,
             provider_message_id=provider_message_id,
             workflow_status=workflow_status,
+            **build_message_role(
+                kind=kind,
+                member_id=member_id,
+                author_member_id=author_member_id,
+            ),
         )
         db.add(message)
         db.flush()
@@ -180,22 +163,20 @@ class MessageManager:
         db.flush()
         return message
 
-    def record_routing_context(
+    def record_routing_policy(
         self,
         db: Session,
         message: Message,
         *,
-        kind: str,
-        routing_policy: str | None = None,
+        routing_policy: str,
     ) -> Message:
-        """Persist what this message is, and (for requests) the policy applied.
+        """Snapshot the policy in force when this request was handled.
 
-        ``routing_policy`` is a snapshot: changing the group's policy afterwards
-        must not rewrite why this message was handled the way it was.
+        Changing the group's policy afterwards must not rewrite why this
+        message was handled the way it was. ``kind`` is deliberately not
+        touched here: it is stamped at creation and never revised.
         """
-        message.kind = kind
-        if routing_policy is not None:
-            message.routing_policy = routing_policy
+        message.routing_policy = routing_policy
         db.add(message)
         db.flush()
         return message

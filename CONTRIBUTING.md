@@ -34,7 +34,16 @@ allows for CORS and scopes the session cookie to.
 
 Postgres schema is applied from `infra/postgres/initdb/` on **first** volume create. To reset schema: `docker compose -f docker-compose.dev.yml down -v` then bring the stack up again.
 
-There are no migrations yet, so any change under `infra/postgres/initdb/` needs that reset before it takes effect locally. Recent additions requiring one: `groups.routing_policy`, `messages.kind`, `messages.routing_policy`, and the rename of `messages.approved_recipient_ids` to `routed_recipient_ids`.
+There is no Alembic, so any change under `infra/postgres/initdb/` needs that reset before it takes effect locally.
+
+For a database with data worth keeping, one-off scripts under `textroute-api/sql/` migrate in place instead. The latest is `2026-08-28_requests_as_lifecycle.sql`, which adds `messages.sender_role` and `messages.author_member_id` with the `messages_role_shape_check` constraint, widens `messages.kind` to the five roles, creates `request_events`, swaps the one-open-per-group index for one-open-per-requester, and narrows `requests.embedding` to 1024 dimensions:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -f textroute-api/sql/2026-08-28_requests_as_lifecycle.sql
+```
+
+Every constraint in it is added `NOT VALID` and validated after the backfill, so it is safe to run against live messages. Keep both paths in sync: `initdb/` is the definition for a fresh database, and the script is how existing ones catch up.
 
 Generate a local moderator-auth secret before starting:
 

@@ -14,6 +14,7 @@ import { GroupSettings } from "./pages/GroupSettings";
 import { Login } from "./pages/Login";
 import { Members } from "./pages/Members";
 import { Messages } from "./pages/Messages";
+import { Requests } from "./pages/Requests";
 import "./index.css";
 
 function AppRoutes() {
@@ -37,9 +38,17 @@ function AppRoutes() {
               className={({ isActive }) =>
                 isActive ? "nav-link active" : "nav-link"
               }
+              to="/requests"
+            >
+              Requests
+            </NavLink>
+            <NavLink
+              className={({ isActive }) =>
+                isActive ? "nav-link active" : "nav-link"
+              }
               to="/messages"
             >
-              Messages
+              Message feed
             </NavLink>
             <NavLink
               className={({ isActive }) =>
@@ -98,8 +107,25 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
-        {/* The review queue is now a tab inside Messages. */}
-        <Route path="/review" element={<Navigate to="/messages" replace />} />
+        {/* Reviewing now happens on the request the message belongs to. */}
+        <Route path="/review" element={<Navigate to="/requests" replace />} />
+        <Route
+          path="/requests"
+          element={
+            <ProtectedRoute>
+              <Requests />
+            </ProtectedRoute>
+          }
+        />
+        {/* Deep link, so the message feed can point at one conversation. */}
+        <Route
+          path="/requests/:requestId"
+          element={
+            <ProtectedRoute>
+              <Requests />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/settings"
           element={

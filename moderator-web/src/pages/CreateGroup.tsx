@@ -7,14 +7,15 @@ export function CreateGroup() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
+  const [userName, setUserName] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !phoneNumber.trim()) {
-      setError("Group name and phone number are required.");
+    if (!name.trim() || !phoneNumber.trim() || !userName.trim()) {
+      setError("Group name, your name, and phone number are required.");
       return;
     }
 
@@ -27,6 +28,7 @@ export function CreateGroup() {
         name: name.trim(),
         description: description.trim() ? description.trim() : null,
         moderator_phone_number: phoneNumber.trim(),
+        moderator_name: userName.trim(),
       });
       setStatus(
         `Created ${group.name}. Group inbound number: ${group.phone_number}`,
@@ -64,7 +66,13 @@ export function CreateGroup() {
           placeholder="+1 555 123 4567"
           onChange={setPhoneNumber}
         />
-
+        <Field
+          id="name"
+          label="Your name"
+          value={userName}
+          placeholder="John Doe"
+          onChange={setUserName}
+        />
         <button className="submit" type="submit" disabled={submitting}>
           [ {submitting ? "Creating..." : "Create Group"} ]
         </button>

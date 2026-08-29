@@ -12,11 +12,18 @@ from src.schemas.registry import SCHEMA_REGISTRY
 
 
 def analyze_request_payload(text: str):
+    """Classify then extract, returning ``(intent, schema, extracted)``.
+
+    ``intent`` is the full ``Intent`` object, so its confidence survives the
+    round trip to the caller.
+    """
     # 0. Determine intent dynamically
     intent = find_intent(text)
 
     # Validate intent
-    chosen_schema = INTENT_SCHEMA_MAP.get(intent, SCHEMA_REGISTRY["GeneralRequest"])
+    chosen_schema = INTENT_SCHEMA_MAP.get(
+        intent.intent, SCHEMA_REGISTRY["GeneralRequest"]
+    )
 
     # 1. Parser for the chosen schema
     parser = PydanticOutputParser(pydantic_object=chosen_schema)

@@ -26,6 +26,7 @@ def create_group(
             name=request.name,
             description=request.description,
             moderator_phone_number=request.moderator_phone_number,
+            moderator_name=request.moderator_name,
         )
     except InvalidPhoneNumberError as e:
         db.rollback()

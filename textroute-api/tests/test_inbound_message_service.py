@@ -13,6 +13,7 @@ from src.core.processors.message_processor import (
     ProcessingResult,
 )
 from src.core.phone_normalize import InvalidPhoneNumberError, normalize_phone_number
+from src.domain.message_role import MessageKind, RequestEventType
 from src.domain.message_status import MessageWorkflowStatus
 from src.services.inbound_errors import (
     DuplicateInboundMessageError,
@@ -24,6 +25,22 @@ from src.services.inbound_errors import (
 from src.services.inbound_message_service import InboundMessageService
 
 
+def _request_manager(open_request=None, *, new_request_id=1):
+    """A request manager that finds ``open_request`` (default: none) for a sender.
+
+    Defaulting to "no open request" matters: a bare MagicMock returns a truthy
+    object from every lookup, which would silently make every test a reply.
+    """
+    mgr = MagicMock()
+    mgr.find_open_for_requester.return_value = open_request
+    mgr.find_open_for_participant.return_value = None
+    mgr.create.return_value = SimpleNamespace(
+        id=new_request_id,
+        original_message_id=None,
+    )
+    return mgr
+
+
 def _service(
     *,
     phone_number_manager=None,
@@ -31,6 +48,8 @@ def _service(
     message_manager=None,
     message_processor=None,
     routing_service=None,
+    request_manager=None,
+    request_event_manager=None,
 ) -> InboundMessageService:
     return InboundMessageService(
         phone_number_manager=phone_number_manager or MagicMock(),
@@ -38,6 +57,8 @@ def _service(
         message_manager=message_manager or MagicMock(),
         message_processor=message_processor or MagicMock(),
         routing_service=routing_service or MagicMock(),
+        request_manager=request_manager or _request_manager(),
+        request_event_manager=request_event_manager or MagicMock(),
     )
 
 
@@ -117,7 +138,6 @@ def test_successful_inbound_message_awaits_moderator():
 
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    message_mgr.find_original_request_candidate_for_member.return_value = None
     message_mgr.create_inbound.return_value = message
 
     processor = MagicMock()
@@ -128,11 +148,13 @@ def test_successful_inbound_message_awaits_moderator():
         notes="heuristic_v1_suggest_active_members",
     )
 
+    request_mgr = _request_manager(new_request_id=7)
     service = _service(
         phone_number_manager=phone_mgr,
         membership_manager=membership_mgr,
         message_manager=message_mgr,
         message_processor=processor,
+        request_manager=request_mgr,
     )
 
     result = service.handle_incoming_message(
@@ -146,7 +168,14 @@ def test_successful_inbound_message_awaits_moderator():
     assert result["status"] == "ok"
     assert result["message_id"] == str(message_id)
     assert result["intent"] == "request_borrow"
+    assert result["request_id"] == 7
     message_mgr.create_inbound.assert_called_once()
+    # The request is the parent, and the message is stamped into it at ingress.
+    created = message_mgr.create_inbound.call_args.kwargs
+    assert created["request_id"] == 7
+    assert created["kind"] is MessageKind.ORIGINAL_REQUEST
+    # Circular FK closed only once the message exists.
+    request_mgr.set_original_message.assert_called_once()
     message_mgr.apply_processing_result.assert_called_once()
     processor.process.assert_called_once()
     assert db.commit.call_count == 2
@@ -389,7 +418,6 @@ def test_processor_failure_marks_processing_failed():
     message = SimpleNamespace(id=message_id, body="hello", member_id=uuid4())
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    message_mgr.find_original_request_candidate_for_member.return_value = None
     message_mgr.create_inbound.return_value = message
     message_mgr.find_by_id.return_value = message
 
@@ -418,7 +446,7 @@ def test_processor_failure_marks_processing_failed():
     db.rollback.assert_called()
 
 
-def test_reply_to_fanout_is_persisted_without_processing():
+def test_reply_into_an_open_request_is_recorded_without_processing():
     db = MagicMock()
     group_id = uuid4()
     member_id = uuid4()
@@ -446,12 +474,13 @@ def test_reply_to_fanout_is_persisted_without_processing():
     )
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    # The lookup yields the original request itself, so the new message parents
-    # directly to it rather than to a per-recipient fan-out copy.
-    message_mgr.find_original_request_candidate_for_member.return_value = (
-        SimpleNamespace(id=parent_id)
-    )
     message_mgr.create_inbound.return_value = message
+
+    # The member is answering a request that reached them, found through that
+    # request's fan-out copy rather than a time window.
+    open_request = SimpleNamespace(id=11, original_message_id=parent_id)
+    request_mgr = _request_manager()
+    request_mgr.find_open_for_participant.return_value = open_request
 
     processor = MagicMock()
     service = _service(
@@ -459,6 +488,7 @@ def test_reply_to_fanout_is_persisted_without_processing():
         membership_manager=membership_mgr,
         message_manager=message_mgr,
         message_processor=processor,
+        request_manager=request_mgr,
     )
 
     result = service.handle_incoming_message(
@@ -468,27 +498,81 @@ def test_reply_to_fanout_is_persisted_without_processing():
         body="Yeah, Saturday morning works.",
     )
 
-    assert result["kind"] == "reply"
-    assert result["processing"] == "possible_reply_persisted"
+    assert result["kind"] == "member_reply"
+    assert result["processing"] == "reply_recorded"
+    assert result["request_id"] == 11
     assert result["parent_message_id"] == str(parent_id)
     processor.process.assert_not_called()
-    lookup = message_mgr.find_original_request_candidate_for_member
-    assert (
-        lookup.call_args.kwargs["within_hours"]
-        == InboundMessageService.ORIGINAL_REQUEST_CANDIDATE_WINDOW_HOURS
+
+    created = message_mgr.create_inbound.call_args.kwargs
+    assert created["kind"] is MessageKind.MEMBER_REPLY
+    # Joins the existing request rather than opening a second one.
+    assert created["request_id"] == 11
+    request_mgr.create.assert_not_called()
+    # The message-graph edge still points at the original request, not at the
+    # per-recipient fan-out copy, keeping the star topology.
+    assert created["parent_message_id"] == parent_id
+
+
+def test_a_senders_own_open_request_takes_precedence():
+    """A requester's follow-up joins their own request, not one they received."""
+    db = MagicMock()
+    group_id = uuid4()
+    member_id = uuid4()
+
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
     )
-    # The link points at the original request, not the fan-out copy.
-    assert message_mgr.create_inbound.call_args.kwargs["parent_message_id"] == parent_id
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=member_id, phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.return_value = None
+    message_mgr.create_inbound.return_value = SimpleNamespace(
+        id=uuid4(),
+        parent_message_id=None,
+        workflow_status=MessageWorkflowStatus.RECEIVED.value,
+    )
+
+    own = SimpleNamespace(id=5, original_message_id=uuid4())
+    someone_elses = SimpleNamespace(id=9, original_message_id=uuid4())
+    request_mgr = _request_manager(own)
+    request_mgr.find_open_for_participant.return_value = someone_elses
+
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=request_mgr,
+    )
+
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="Actually, Sunday would work too.",
+    )
+
+    assert result["request_id"] == 5
+    request_mgr.find_open_for_participant.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
 # Kind x policy: the central invariant. Kind selects the workflow; the group
-# routing policy applies to NEW_REQUEST only. A non-null parent_message_id is a
-# relationship, never a moderation decision.
+# routing policy applies to an original_request only. Belonging to a request is
+# parentage, never a moderation decision.
 # ---------------------------------------------------------------------------
 
 
-def _routing_fixtures(*, routing_policy, original_request_candidate_id=None):
+def _routing_fixtures(*, routing_policy, open_request=None):
     group_id = uuid4()
     member_id = uuid4()
     other_id = uuid4()
@@ -516,19 +600,20 @@ def _routing_fixtures(*, routing_policy, original_request_candidate_id=None):
 
     message = SimpleNamespace(
         id=uuid4(),
+        request_id=open_request.id if open_request is not None else 1,
         body="Does anyone have an axe I can borrow?",
         member_id=member_id,
-        parent_message_id=original_request_candidate_id,
+        parent_message_id=(
+            open_request.original_message_id if open_request is not None else None
+        ),
         workflow_status=MessageWorkflowStatus.RECEIVED.value,
     )
     message_mgr = MagicMock()
     message_mgr.find_by_provider_message_id.return_value = None
-    message_mgr.find_original_request_candidate_for_member.return_value = (
-        SimpleNamespace(id=original_request_candidate_id)
-        if original_request_candidate_id is not None
-        else None
-    )
     message_mgr.create_inbound.return_value = message
+
+    request_mgr = _request_manager()
+    request_mgr.find_open_for_participant.return_value = open_request
 
     processor = MagicMock()
     processor.process.return_value = ProcessingResult(
@@ -543,20 +628,31 @@ def _routing_fixtures(*, routing_policy, original_request_candidate_id=None):
         "delivered_outbound_ids": [str(uuid4())],
         "delivery_failures": [],
     }
-    return phone_mgr, membership_mgr, message_mgr, processor, routing, other
+    return (
+        phone_mgr,
+        membership_mgr,
+        message_mgr,
+        processor,
+        routing,
+        other,
+        request_mgr,
+    )
 
 
 def test_new_request_under_auto_group_is_routed_automatically():
     db = MagicMock()
-    phone_mgr, membership_mgr, message_mgr, processor, routing, other = (
+    phone_mgr, membership_mgr, message_mgr, processor, routing, other, request_mgr = (
         _routing_fixtures(routing_policy="auto_group")
     )
+    event_mgr = MagicMock()
     service = _service(
         phone_number_manager=phone_mgr,
         membership_manager=membership_mgr,
         message_manager=message_mgr,
         message_processor=processor,
         routing_service=routing,
+        request_manager=request_mgr,
+        request_event_manager=event_mgr,
     )
 
     result = service.handle_incoming_message(
@@ -568,22 +664,24 @@ def test_new_request_under_auto_group_is_routed_automatically():
 
     routing.fan_out.assert_called_once()
     assert routing.fan_out.call_args.args[2] == [other]
-    assert result["kind"] == "new_request"
+    assert result["kind"] == "original_request"
     assert result["routing_policy"] == "auto_group"
     assert result["processing"] == "auto_group_authorized"
     # Policy authorized routing; no moderator approved it.
     message_mgr.apply_routing_authorization.assert_called_once()
     message_mgr.apply_approval.assert_not_called()
+    # ...and the audit trail says so, rather than naming a person.
+    event = event_mgr.record.call_args.kwargs
+    assert event["event_type"] is RequestEventType.AUTHORIZED
+    assert event["payload"]["by"] == "policy_auto_group"
 
 
 def test_reply_under_auto_group_is_never_broadcast():
     """Bob's "I have one." must not be fanned out to the whole group."""
     db = MagicMock()
-    phone_mgr, membership_mgr, message_mgr, processor, routing, _ = (
-        _routing_fixtures(
-            routing_policy="auto_group",
-            original_request_candidate_id=uuid4(),
-        )
+    open_request = SimpleNamespace(id=3, original_message_id=uuid4())
+    phone_mgr, membership_mgr, message_mgr, processor, routing, _, request_mgr = (
+        _routing_fixtures(routing_policy="auto_group", open_request=open_request)
     )
     service = _service(
         phone_number_manager=phone_mgr,
@@ -591,6 +689,7 @@ def test_reply_under_auto_group_is_never_broadcast():
         message_manager=message_mgr,
         message_processor=processor,
         routing_service=routing,
+        request_manager=request_mgr,
     )
 
     result = service.handle_incoming_message(
@@ -603,18 +702,19 @@ def test_reply_under_auto_group_is_never_broadcast():
     routing.fan_out.assert_not_called()
     processor.process.assert_not_called()
     message_mgr.apply_routing_authorization.assert_not_called()
-    assert result["kind"] == "reply"
+    assert result["kind"] == "member_reply"
     # Policy is not even consulted for replies, so no snapshot is recorded.
     assert "routing_policy" not in result
+    message_mgr.record_routing_policy.assert_not_called()
 
 
 def test_reply_under_moderator_required_behaves_identically():
     """Reply handling is a slice-level policy, not something the group policy controls."""
     db = MagicMock()
-    phone_mgr, membership_mgr, message_mgr, processor, routing, _ = (
+    open_request = SimpleNamespace(id=3, original_message_id=uuid4())
+    phone_mgr, membership_mgr, message_mgr, processor, routing, _, request_mgr = (
         _routing_fixtures(
-            routing_policy="moderator_required",
-            original_request_candidate_id=uuid4(),
+            routing_policy="moderator_required", open_request=open_request
         )
     )
     service = _service(
@@ -623,6 +723,7 @@ def test_reply_under_moderator_required_behaves_identically():
         message_manager=message_mgr,
         message_processor=processor,
         routing_service=routing,
+        request_manager=request_mgr,
     )
 
     result = service.handle_incoming_message(
@@ -634,13 +735,13 @@ def test_reply_under_moderator_required_behaves_identically():
 
     routing.fan_out.assert_not_called()
     processor.process.assert_not_called()
-    assert result["kind"] == "reply"
-    assert result["processing"] == "possible_reply_persisted"
+    assert result["kind"] == "member_reply"
+    assert result["processing"] == "reply_recorded"
 
 
 def test_auto_matched_falls_back_to_moderation():
     db = MagicMock()
-    phone_mgr, membership_mgr, message_mgr, processor, routing, _ = (
+    phone_mgr, membership_mgr, message_mgr, processor, routing, _, request_mgr = (
         _routing_fixtures(routing_policy="auto_matched")
     )
     service = _service(
@@ -649,6 +750,7 @@ def test_auto_matched_falls_back_to_moderation():
         message_manager=message_mgr,
         message_processor=processor,
         routing_service=routing,
+        request_manager=request_mgr,
     )
 
     result = service.handle_incoming_message(
@@ -659,14 +761,14 @@ def test_auto_matched_falls_back_to_moderation():
     )
 
     routing.fan_out.assert_not_called()
-    assert result["kind"] == "new_request"
+    assert result["kind"] == "original_request"
     # Snapshot still records what the group was set to at the time.
     assert result["routing_policy"] == "auto_matched"
 
 
 def test_auto_group_with_no_eligible_recipients_skips_fanout():
     db = MagicMock()
-    phone_mgr, membership_mgr, message_mgr, processor, routing, other = (
+    phone_mgr, membership_mgr, message_mgr, processor, routing, other, request_mgr = (
         _routing_fixtures(routing_policy="auto_group")
     )
 
@@ -685,6 +787,7 @@ def test_auto_group_with_no_eligible_recipients_skips_fanout():
         message_manager=message_mgr,
         message_processor=processor,
         routing_service=routing,
+        request_manager=request_mgr,
     )
 
     result = service.handle_incoming_message(
