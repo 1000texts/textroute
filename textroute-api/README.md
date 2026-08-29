@@ -189,9 +189,38 @@ The inbound path makes three separate decisions rather than one:
 
 A request's lifecycle now bounds reply collection, replacing the old two-hour
 timing window: once a request is completed, cancelled, or expired, the next
-message from those members starts a new one. `RequestService.sweep_expired`
-closes abandoned requests (default 72h) so they stop capturing unrelated
-messages.
+message from those members starts a new one.
+
+#### How an open request ends
+
+Two bounds, both closing it as `expired`, both swept by
+`RequestService.sweep_expired`:
+
+- **Inactivity** (`REQUEST_INACTIVITY_AFTER_HOURS`, default 2) — the normal
+  ending, measured from `requests.last_activity_at`. A conversation that has
+  gone quiet is over.
+- **Maximum lifetime** (`REQUEST_EXPIRES_AFTER_HOURS`, default 72) — the ceiling,
+  stamped into `expires_at` at creation, for a request that keeps seeing
+  activity yet never resolves.
+
+They share a status because they mean the same thing to a moderator: closed
+without resolution. The `expired` event's payload carries `reason`
+(`inactivity` or `maximum_lifetime`) along with both timestamps it was judged
+against, which keeps the status vocabulary at four values and the event
+vocabulary at six.
+
+`last_activity_at` is stored, not derived from `max(messages.created_at)`, so
+the sweep is one indexed read. It is maintained inside
+`MessageManager.create_inbound` / `create_outbound` because those are the only
+way a row enters a request, which makes the invariant true by construction
+rather than dependent on every service remembering to bump it.
+
+**The sweep must be scheduled to have any effect.** Nothing in the request path
+closes a request on a timer; see `scripts/sweep_requests.py` and the scheduled
+jobs section of `DEPLOY.md`. Unscheduled, a stale open request keeps absorbing
+its members' later messages as replies — which looks like a classification bug
+and is not one. `determine_inbound_kind` is correct; it was handed an open
+request that should have closed hours earlier.
 
 **Deliberately narrow rules (change only on purpose):**
 

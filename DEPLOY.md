@@ -145,6 +145,54 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 15 3 * * * root cd /srv/www/textroute && ./infra/scripts/backup-db.sh >> /var/log/textroute-backup.log 2>&1
 ```
 
+## Scheduled jobs
+
+### Closing finished requests (required)
+
+Requests are opened by inbound SMS and closed by a moderator, but a request that
+simply stops being talked about has nobody to close it. While it stays open,
+the next unrelated message from any of its members is threaded into it as a
+reply rather than starting a new request. One scheduled job fixes that:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T textroute \
+    python scripts/sweep_requests.py
+```
+
+This is not optional maintenance. Without it, `requests.last_activity_at` is
+maintained and never read, and every request stays open until something else
+closes it. Install it at `/etc/cron.d/textroute-sweep`:
+
+```
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/15 * * * * root cd /srv/www/textroute && docker compose -f docker-compose.prod.yml exec -T textroute python scripts/sweep_requests.py >> /var/log/textroute-sweep.log 2>&1
+```
+
+Every 15 minutes keeps the lag on a two-hour window under about 13 percent. The
+job is safe to run when there is nothing to close and safe to overlap with
+itself; a second runner simply finds fewer requests. `-T` matters, since cron
+has no TTY.
+
+Two periods control it, both settable in `.env`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `REQUEST_INACTIVITY_AFTER_HOURS` | `2` | Quiet for this long and the request closes. The normal ending. |
+| `REQUEST_EXPIRES_AFTER_HOURS` | `72` | Absolute ceiling, for a request that keeps seeing activity but never resolves. |
+
+Both close the request as `expired`; the `expired` event's payload `reason` says
+which bound applied (`inactivity` or `maximum_lifetime`). Note that
+`REQUEST_EXPIRES_AFTER_HOURS` is stamped onto each request when it is created,
+so changing it affects new requests only.
+
+To watch what a sweep would do without doing it:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T textroute \
+    python scripts/verify_request_rollup.py
+```
+
 ## Security notes
 
 **The inbound webhook is authenticated by a shared secret.** `POST /webhook/*`
