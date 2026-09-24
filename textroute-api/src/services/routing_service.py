@@ -17,6 +17,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from src.core.managers.membership_manager import MembershipManager
 from src.core.managers.message_manager import MessageManager
 from src.core.managers.phone_number_manager import PhoneNumberManager
 from src.core.managers.request_event_manager import RequestEventManager
@@ -45,10 +46,12 @@ class RoutingService:
         phone_number_manager: PhoneNumberManager | None = None,
         messaging_service: MessagingService | None = None,
         request_event_manager: RequestEventManager | None = None,
+        membership_manager: MembershipManager | None = None,
     ):
         self.message_manager = message_manager or MessageManager()
         self.phone_number_manager = phone_number_manager or PhoneNumberManager()
         self.request_event_manager = request_event_manager or RequestEventManager()
+        self.membership_manager = membership_manager or MembershipManager()
         self.messaging_service = messaging_service or MessagingService(
             self.message_manager
         )
@@ -59,7 +62,7 @@ class RoutingService:
         message: Message,
         recipients: list[Member],
     ) -> dict:
-        """Send ``message.body`` unchanged to each recipient.
+        """Send ``message.body`` to each recipient, credited to whoever wrote it.
 
         Accepts any status in ``PRE_DELIVERY_STATUSES`` — both moderator-approved
         and policy-authorized messages are cleared for delivery, and this service
@@ -86,17 +89,34 @@ class RoutingService:
         delivered_ids: list[str] = []
         failures: list[dict] = []
 
+        # Whose words these are. The copy itself must have no author -- nobody
+        # wrote it, the system reproduced it -- so the name comes from the message
+        # being fanned out, resolved once rather than per recipient.
+        #
+        # Group-scoped rather than ``message.author.name``: a member may be known
+        # by a different name in this group, and the SMS should use the one the
+        # group knows them by.
+        sender_name = None
+        if message.author_member_id is not None:
+            sender_name = self.membership_manager.get_display_names(
+                db,
+                group_id=group.id,
+                member_ids=[message.author_member_id],
+            ).get(message.author_member_id)
+
         for recipient in recipients:
             try:
                 # The copy is a system artefact: it carries the recipient in
-                # member_id and no author, because nobody wrote it — the body is
-                # the requester's, unchanged.
+                # member_id and no author. The body is the requester's words,
+                # with their name prefixed, because the recipient sees only the
+                # group's number and nothing else would say who is asking.
                 outbound = self.messaging_service.send_message(
                     db,
                     group=group,
                     to_member=recipient,
                     from_phone_number=from_number,
-                    body=message.body,  # original SMS unchanged
+                    body=message.body,
+                    sender_name=sender_name,
                     kind=MessageKind.FANOUT_COPY,
                     request_id=message.request_id,
                     parent_message_id=message.id,

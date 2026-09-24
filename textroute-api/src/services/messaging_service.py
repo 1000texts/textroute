@@ -2,6 +2,11 @@
 
 Used by moderation fan-out (and future automated sends). Callers own the
 surrounding transaction/commit for multi-recipient loops.
+
+The text sent is the caller's body with its sender prefixed (see
+``src.domain.outbound_text``), because a recipient sees only the group's number
+and would otherwise have no idea who is speaking. The same composed string is
+sent and stored.
 """
 
 import logging
@@ -16,6 +21,7 @@ from src.core.providers.sms_provider import (
 )
 from src.domain.message_role import MessageKind
 from src.domain.message_status import MessageWorkflowStatus
+from src.domain.outbound_text import with_sender
 from src.models import Group, Member, Message
 
 logger = logging.getLogger(__name__)
@@ -48,6 +54,7 @@ class MessagingService:
         from_phone_number: str,
         body: str,
         kind: MessageKind,
+        sender_name: str | None = None,
         author_member_id=None,
         request_id: int | None = None,
         parent_message_id=None,
@@ -58,7 +65,16 @@ class MessagingService:
         from someone else's words, or a ``moderator_clarification`` a person
         wrote. The two differ in whether ``author_member_id`` is set, which the
         role shape enforces.
+
+        ``sender_name`` is whoever the recipient should see this as being from,
+        and is prefixed to the text. It is not always the ``author_member_id``:
+        a fan-out copy must have no author, yet it carries a member's words and
+        has to say whose. Callers supply the name because only they can trace it.
         """
+        # Composed once, here, so the string handed to the provider is the string
+        # persisted. Doing it in the provider would leave the stored row claiming
+        # something else was sent; doing it per caller would let one path drift.
+        text = with_sender(body, sender_name=sender_name, kind=kind)
         logger.info(
             "outbound_message_sending",
             extra={
@@ -70,7 +86,7 @@ class MessagingService:
             provider_message_id = self.sms_provider.send_sms(
                 from_number=from_phone_number,
                 to_number=to_member.phone_number,
-                body=body,
+                body=text,
             )
         except SmsProviderError:
             logger.exception(
@@ -91,7 +107,7 @@ class MessagingService:
             request_id=request_id,
             from_phone_number=from_phone_number,
             to_phone_number=to_member.phone_number,
-            body=body,
+            body=text,
             provider_message_id=provider_message_id,
             parent_message_id=parent_message_id,
             workflow_status=MessageWorkflowStatus.SENT.value,

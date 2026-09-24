@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from src.api.dependencies import verify_webhook_secret
@@ -18,6 +18,7 @@ from src.services.inbound_errors import (
     UnknownSenderError,
 )
 from src.services.inbound_message_service import InboundMessageService
+from src.services.intent_service import discover_intent
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +34,28 @@ router = APIRouter(
 @router.post("/inbound")  # keep simulator-compatible path
 def receive_message(
     request: IncomingMessageRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     service = InboundMessageService()
     try:
-        return service.handle_incoming_message(
+        result = service.handle_incoming_message(
             db=db,
             from_phone_number=request.from_phone_number,
             to_phone_number=request.to_phone_number,
             body=request.body,
             provider_message_id=request.provider_message_id,
         )
+        if result.get("discover_intent") and result.get("request_id") is not None:
+            background_tasks.add_task(discover_intent, result["request_id"])
+            logger.info(
+                "intent_queued",
+                extra={
+                    "request_id": result["request_id"],
+                    "message_id": result.get("message_id"),
+                },
+            )
+        return result
     except InvalidPhoneNumberError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e)) from e

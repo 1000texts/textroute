@@ -24,7 +24,20 @@ from src.core.processors.message_processor import (
 )
 from src.core.phone_normalize import normalize_phone_number
 from src.core.managers.phone_number_manager import PhoneNumberManager
-from src.core.providers.request_analyzer import RequestAnalysis, RequestAnalyzer
+from src.core.providers.request_analyzer import RequestAnalyzer
+from src.domain.association import (
+    CHOICE_RECEIVED,
+    CHOICE_UNRECOGNIZED,
+    NEW_REQUEST_LABEL,
+    NEW_REQUEST_LETTER,
+    candidate_label,
+    choice_letters,
+    clarification_question,
+    cosine_similarity,
+    leading_request,
+    parse_choice,
+)
+from src.domain.intent_status import REPLY_DEFERRED, REPLY_RECORDED, intent_blocks_reply
 from src.domain.message_role import (
     MessageKind,
     RequestEventType,
@@ -89,6 +102,7 @@ class InboundMessageService:
         request_manager: RequestManager | None = None,
         request_event_manager: RequestEventManager | None = None,
         request_analyzer: RequestAnalyzer | None = None,
+        embed_text=None,
     ):
         self.phone_number_manager = phone_number_manager or PhoneNumberManager()
         self.membership_manager = membership_manager or MembershipManager()
@@ -97,6 +111,8 @@ class InboundMessageService:
         self.request_manager = request_manager or RequestManager()
         self.request_event_manager = request_event_manager or RequestEventManager()
         self.request_analyzer = request_analyzer or RequestAnalyzer()
+        # None means the Ollama embeddings in src.ai.llm. Tests pass a function.
+        self.embed_text = embed_text
         self.routing_service = routing_service or RoutingService(
             message_manager=self.message_manager,
             phone_number_manager=self.phone_number_manager,
@@ -142,11 +158,48 @@ class InboundMessageService:
             db, member, group
         )  # if member is not active, raise an error
 
-        # Step 1 of 3: which request does this belong to? Parentage only. Both
-        # lookups read explicit message records — an open request this member
-        # owns, or one whose fan-out copy names them as its recipient — so the
-        # answer never depends on a clock.
-        existing_request = self._find_open_request(db, group=group, member=member)
+        # A letter answering a question we already asked is not a new text.
+        pending = self.message_manager.find_pending_clarification(
+            db, group_id=group.id, member_id=member.id
+        )
+        choices = _clarification_choices(pending)
+        if choices is not None:
+            return self._handle_choice(
+                db,
+                pending=pending,
+                choices=choices,
+                group=group,
+                member=member,
+                body=body,
+                from_phone_number=from_phone_number,
+                to_phone_number=to_phone_number,
+                provider_message_id=provider_message_id,
+            )
+
+        # Which open requests could this text be answering? Own request, plus
+        # every open request whose fan-out copy names them. One is a reply.
+        # None is a new request. Two or more are weighed.
+        candidates = self._candidate_requests(db, group=group, member=member)
+        if len(candidates) >= 2:
+            winner_id = self._weigh(db, body, candidates)
+            if winner_id is None:
+                return self._ask_which_request(
+                    db,
+                    group=group,
+                    member=member,
+                    candidates=candidates,
+                    body=body,
+                    from_phone_number=from_phone_number,
+                    to_phone_number=to_phone_number,
+                    provider_message_id=provider_message_id,
+                )
+            existing_request = next(
+                request for request in candidates if request.id == winner_id
+            )
+        elif len(candidates) == 1:
+            existing_request = candidates[0]
+        else:
+            existing_request = None
 
         # Step 2 of 3: decide what this message *is*, once, here. Everything
         # downstream reads the stamped column rather than working it out again.
@@ -218,6 +271,22 @@ class InboundMessageService:
         # what a routing policy may act on. Anything not routable is recorded
         # into its request and left alone.
         if not is_routable(kind):
+            logger.info(
+                "reply_received",
+                extra={
+                    "message_id": str(message.id),
+                    "request_id": request.id,
+                    "parent_message_id": (
+                        str(message.parent_message_id)
+                        if message.parent_message_id
+                        else None
+                    ),
+                },
+            )
+            if intent_blocks_reply(getattr(request, "intent_status", None)):
+                return self._defer_reply(
+                    db, message=message, group=group, member=member, request=request
+                )
             return self._handle_member_reply(
                 db, message=message, group=group, member=member, request=request
             )
@@ -225,33 +294,300 @@ class InboundMessageService:
             db, message=message, group=group, member=member, request=request
         )
 
-    def _find_open_request(
+    def _candidate_requests(
         self,
         db: Session,
         *,
         group: Group,
         member: Member,
-    ) -> Requests | None:
-        """The live request this message belongs to, if any.
-
-        Two explicit lookups, in order: the sender's own open request (their
-        follow-up), then any open request whose fan-out copy was addressed to
-        them (their answer to someone else's). Both read message rows and
-        columns, which is what replaced the old two-hour timing window: a
-        request's lifecycle now says how long it can gather replies.
-        """
+    ) -> list[Requests]:
+        """Open requests this sender could be answering, own request first."""
         own = self.request_manager.find_open_for_requester(
             db,
             group_id=group.id,
             requester_id=member.id,
         )
-        if own is not None:
-            return own
-        return self.request_manager.find_open_for_participant(
+        found = self.request_manager.find_open_for_participant(
             db,
             group_id=group.id,
             member_id=member.id,
         )
+        if found is None:
+            others: list[Requests] = []
+        elif isinstance(found, list):
+            others = found
+        else:
+            others = [found]
+
+        candidates: list[Requests] = []
+        if own is not None:
+            candidates.append(own)
+        own_id = getattr(own, "id", None)
+        for request in others:
+            if request.id != own_id:
+                candidates.append(request)
+        return candidates
+
+    def _weigh(
+        self,
+        db: Session,
+        body: str,
+        candidates: list[Requests],
+    ) -> int | None:
+        """Request id that clearly associates, or None when the scores are low.
+
+        An embedding failure is low confidence: ask, do not guess, do not drop
+        the SMS.
+        """
+        try:
+            inbound_vector = self._embed(body)
+            scores: list[tuple[int, float]] = []
+            for request in candidates:
+                scores.append(
+                    (
+                        request.id,
+                        cosine_similarity(
+                            inbound_vector,
+                            self._embed(self._candidate_text(db, request)),
+                        ),
+                    )
+                )
+        except Exception:
+            logger.exception("association_embed_failed")
+            return None
+        return leading_request(scores)
+
+    def _embed(self, text: str) -> list[float]:
+        if self.embed_text is not None:
+            return list(self.embed_text(text))
+        # Imported here so a path that never weighs does not load Ollama.
+        from src.ai.llm import EMBEDDINGS
+
+        return list(EMBEDDINGS.embed_query(text))
+
+    def _candidate_text(self, db: Session, request: Requests) -> str:
+        summary = getattr(request, "summary", None)
+        original_body = None
+        original_id = getattr(request, "original_message_id", None)
+        if original_id is not None:
+            original = self.message_manager.find_by_id(db, original_id)
+            if original is not None:
+                original_body = original.body
+        return candidate_label(
+            summary=summary,
+            original_body=original_body,
+            request_id=request.id,
+        )
+
+    def _ask_which_request(
+        self,
+        db: Session,
+        *,
+        group: Group,
+        member: Member,
+        candidates: list[Requests],
+        body: str,
+        from_phone_number: str,
+        to_phone_number: str,
+        provider_message_id: str | None,
+    ) -> dict:
+        """Store the text unstamped and ask which request it belongs to."""
+        has_own = any(
+            getattr(request, "requester_id", None) == member.id
+            for request in candidates
+        )
+        letters = choice_letters(len(candidates))
+        options: list[tuple[str, str]] = []
+        choices: dict = {}
+        for letter, request in zip(letters, candidates):
+            label = self._candidate_text(db, request)
+            options.append((letter, label))
+            choices[letter] = {"request_id": request.id, "label": label}
+        if not has_own:
+            options.append((NEW_REQUEST_LETTER, NEW_REQUEST_LABEL))
+            choices[NEW_REQUEST_LETTER] = {
+                "request_id": None,
+                "label": NEW_REQUEST_LABEL,
+            }
+        question = clarification_question(options)
+        message = self.message_manager.create_pending_choice(
+            db,
+            group_id=group.id,
+            member_id=member.id,
+            from_phone_number=from_phone_number,
+            to_phone_number=to_phone_number,
+            body=body,
+            provider_message_id=provider_message_id,
+            choices=choices,
+        )
+        db.commit()
+        self._send_question(db, group=group, member=member, question=question)
+        return {
+            "status": "ok",
+            "message_id": str(message.id),
+            "group_id": str(group.id),
+            "member_id": str(member.id),
+            "request_id": None,
+            "kind": None,
+            "processing": "clarification_requested",
+        }
+
+    def _send_question(
+        self,
+        db: Session,
+        *,
+        group: Group,
+        member: Member,
+        question: str,
+    ) -> None:
+        try:
+            from_number = self.routing_service.resolve_from_number(db, group)
+            self.routing_service.messaging_service.send_message(
+                db,
+                group=group,
+                to_member=member,
+                from_phone_number=from_number,
+                body=question,
+                kind=MessageKind.FANOUT_COPY,
+                sender_name=None,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "clarification_send_failed",
+                extra={"group_id": str(group.id), "member_id": str(member.id)},
+            )
+
+    def _handle_choice(
+        self,
+        db: Session,
+        *,
+        pending: Message,
+        choices: dict,
+        group: Group,
+        member: Member,
+        body: str,
+        from_phone_number: str,
+        to_phone_number: str,
+        provider_message_id: str | None,
+    ) -> dict:
+        letter = parse_choice(body, set(choices))
+        if letter is None:
+            self.message_manager.record_choice_text(
+                db,
+                group_id=group.id,
+                member_id=member.id,
+                from_phone_number=from_phone_number,
+                to_phone_number=to_phone_number,
+                body=body,
+                provider_message_id=provider_message_id,
+                note=CHOICE_UNRECOGNIZED,
+            )
+            db.commit()
+            question = clarification_question(
+                [
+                    (key, value["label"])
+                    for key, value in choices.items()
+                    if isinstance(value, dict) and value.get("label")
+                ]
+            )
+            self._send_question(db, group=group, member=member, question=question)
+            return {
+                "status": "ok",
+                "message_id": str(pending.id),
+                "request_id": None,
+                "kind": None,
+                "processing": "clarification_requested",
+            }
+
+        self.message_manager.record_choice_text(
+            db,
+            group_id=group.id,
+            member_id=member.id,
+            from_phone_number=from_phone_number,
+            to_phone_number=to_phone_number,
+            body=body,
+            provider_message_id=provider_message_id,
+            note=CHOICE_RECEIVED,
+        )
+        selected = choices[letter]
+        request_id = selected.get("request_id") if isinstance(selected, dict) else None
+        if request_id is None:
+            request = self.request_manager.create(
+                db,
+                group_id=group.id,
+                requester_id=member.id,
+                expires_at=datetime.now(timezone.utc) + self.REQUEST_EXPIRES_AFTER,
+            )
+            self.message_manager.attach_held_message(
+                db,
+                pending,
+                kind=MessageKind.ORIGINAL_REQUEST,
+                member_id=member.id,
+                request_id=request.id,
+                parent_message_id=None,
+            )
+            self.request_manager.set_original_message(db, request, pending.id)
+            db.commit()
+            return self._handle_new_request(
+                db, message=pending, group=group, member=member, request=request
+            )
+
+        request = self.request_manager.find_by_id(db, request_id)
+        parent_id = getattr(request, "original_message_id", None) if request else None
+        self.message_manager.attach_held_message(
+            db,
+            pending,
+            kind=MessageKind.MEMBER_REPLY,
+            member_id=member.id,
+            request_id=request_id,
+            parent_message_id=parent_id,
+        )
+        db.commit()
+        return self._handle_member_reply(
+            db, message=pending, group=group, member=member, request=request
+        )
+
+    def _defer_reply(
+        self,
+        db: Session,
+        *,
+        message: Message,
+        group: Group,
+        member: Member,
+        request: Requests,
+    ) -> dict:
+        """Keep the reply on its request until intent is committed."""
+        self.message_manager.set_workflow_status(
+            db,
+            message,
+            MessageWorkflowStatus.RECEIVED.value,
+            processing_notes=REPLY_DEFERRED,
+        )
+        db.commit()
+        logger.info(
+            "reply_deferred_waiting_for_intent",
+            extra={
+                "message_id": str(message.id),
+                "request_id": request.id,
+                "parent_message_id": (
+                    str(message.parent_message_id) if message.parent_message_id else None
+                ),
+            },
+        )
+        return {
+            "status": "ok",
+            "message_id": str(message.id),
+            "group_id": str(group.id),
+            "member_id": str(member.id),
+            "request_id": request.id,
+            "kind": MessageKind.MEMBER_REPLY.value,
+            "processing": "reply_deferred",
+            "parent_message_id": (
+                str(message.parent_message_id) if message.parent_message_id else None
+            ),
+        }
 
     def _handle_member_reply(
         self,
@@ -274,13 +610,31 @@ class InboundMessageService:
         The group routing policy is deliberately not consulted here, so
         ``AUTO_GROUP`` can never broadcast a reply to the whole group.
         """
+        if getattr(message, "processing_notes", None) == REPLY_RECORDED:
+            return {
+                "status": "ok",
+                "message_id": str(message.id),
+                "group_id": str(group.id),
+                "member_id": str(member.id),
+                "request_id": request.id,
+                "kind": MessageKind.MEMBER_REPLY.value,
+                "processing": "reply_recorded",
+                "parent_message_id": (
+                    str(message.parent_message_id) if message.parent_message_id else None
+                ),
+            }
         self.message_manager.set_workflow_status(
             db,
             message,
             MessageWorkflowStatus.RECEIVED.value,
-            processing_notes="reply_recorded_unprocessed",
+            processing_notes=REPLY_RECORDED,
         )
+        message.processing_notes = REPLY_RECORDED
         db.commit()
+        logger.info(
+            "reply_processed",
+            extra={"message_id": str(message.id), "request_id": request.id},
+        )
         return {
             "status": "ok",
             "message_id": str(message.id),
@@ -345,6 +699,7 @@ class InboundMessageService:
                 "kind": MessageKind.ORIGINAL_REQUEST.value,
                 "processing": "failed",
                 "workflow_status": MessageWorkflowStatus.PROCESSING_FAILED.value,
+                "discover_intent": True,
             }
 
         response = {
@@ -359,6 +714,7 @@ class InboundMessageService:
             "intent": result.intent,
             "suggested_recipient_count": len(result.suggested_recipient_ids),
             "processing": result.notes,
+            "discover_intent": True,
         }
 
         if requires_moderation(group.routing_policy):
@@ -368,8 +724,8 @@ class InboundMessageService:
             db,
             message=message,
             group=group,
+            member=member,
             request=request,
-            suggested_recipient_ids=result.suggested_recipient_ids,
             response=response,
         )
 
@@ -379,19 +735,19 @@ class InboundMessageService:
         *,
         message: Message,
         group: Group,
+        member: Member,
         request: Requests,
-        suggested_recipient_ids: list,
         response: dict,
     ) -> dict:
         """The group's policy authorizes routing — no moderator approved this.
 
-        Status is ``auto_authorized``, never ``approved``: the stored row must
-        not imply a human reviewed the message.
+        Recipients are every other active member. That set does not come from
+        the processor's suggestions or from intent. Status is
+        ``auto_authorized``, never ``approved``: the stored row must not imply
+        a human reviewed the message.
         """
-        recipients = self._load_active_recipients(
-            db,
-            group_id=group.id,
-            recipient_ids=suggested_recipient_ids,
+        recipients = self._other_active_members(
+            db, group_id=group.id, sender_id=member.id
         )
         if not recipients:
             # Nobody to route to (e.g. single-member group). Leave it for a
@@ -421,10 +777,28 @@ class InboundMessageService:
         db.commit()
 
         delivery = self.routing_service.fan_out(db, message, recipients)
+        logger.info(
+            "original_fanned_out",
+            extra={
+                "message_id": str(message.id),
+                "request_id": request.id,
+                "recipient_count": len(recipients),
+            },
+        )
         response["workflow_status"] = message.workflow_status
         response["processing"] = "auto_group_authorized"
         response.update(delivery)
         return response
+
+    def _other_active_members(self, db: Session, *, group_id, sender_id) -> list[Member]:
+        """Every active member of the group except the sender."""
+        recipients: list[Member] = []
+        for membership in self.membership_manager.list_active_memberships(db, group_id):
+            person = getattr(membership, "member", None)
+            if person is None or person.id == sender_id:
+                continue
+            recipients.append(person)
+        return recipients
 
     def _load_active_recipients(
         self,
@@ -546,40 +920,14 @@ class InboundMessageService:
             candidates=candidates,
         )
 
-        # Describe the request on the request itself. Recipients come from the
-        # processor above; the analyzer only says what is being asked for, and
-        # falls back to those same keyword results when the model is unavailable.
-        analysis = self.request_analyzer.analyze(
-            message.body,
-            fallback=RequestAnalysis(
-                request_type=result.intent,
-                summary=message.body[:140],
-                extracted_filters=result.constraints or {},
-                confidence=result.confidence,
-                notes="keyword_fallback",
-            ),
-        )
-        self.request_manager.apply_analysis(
-            db,
-            request,
-            request_type=analysis.request_type,
-            extracted_filters=analysis.extracted_filters,
-            summary=analysis.summary,
-            embedding=analysis.embedding,
-            model_name=analysis.model_name,
-            confidence=analysis.confidence,
-        )
-
-        # The message records the analysis that drove *this* routing decision,
-        # while the request carries the current best understanding. They can
-        # diverge if a request is re-analyzed, which is the point of keeping
-        # both.
+        # Keyword snapshot for the routing decision only. The request's intent
+        # is written later, off this request, by IntentService.
         self.message_manager.apply_processing_result(
             db,
             message,
-            intent=analysis.request_type,
-            constraints=analysis.extracted_filters or None,
-            confidence=analysis.confidence,
+            intent=result.intent,
+            constraints=result.constraints or None,
+            confidence=result.confidence,
             suggested_recipient_ids=result.suggested_recipient_ids,
             notes=result.notes,
             workflow_status=MessageWorkflowStatus.AWAITING_MODERATOR.value,
@@ -592,3 +940,20 @@ class InboundMessageService:
             },
         )
         return result
+
+
+def _clarification_choices(pending) -> dict | None:
+    """The letter map on a held message, or None when this row is not one.
+
+    A bare mock has no real ``constraints`` dict, so existing tests that do
+    not set up a pending question fall through to normal ingress.
+    """
+    if pending is None:
+        return None
+    constraints = getattr(pending, "constraints", None)
+    if not isinstance(constraints, dict):
+        return None
+    choices = constraints.get("clarification")
+    if not isinstance(choices, dict) or not choices:
+        return None
+    return choices

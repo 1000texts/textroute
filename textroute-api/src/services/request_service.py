@@ -161,6 +161,15 @@ class RequestService:
         except RoutingError as exc:
             raise RequestError(str(exc)) from exc
 
+        # The recipient sees the group's number, so without this the question
+        # reads as coming from the group itself. ``send_message`` adds the
+        # "(Moderator)" part, from the kind.
+        sender_name = self.membership_manager.get_display_names(
+            db,
+            group_id=group_id,
+            member_ids=[author_member_id],
+        ).get(author_member_id)
+
         sent: list[str] = []
         failures: list[dict] = []
         for recipient in recipients:
@@ -171,6 +180,7 @@ class RequestService:
                     to_member=recipient,
                     from_phone_number=from_number,
                     body=body,
+                    sender_name=sender_name,
                     kind=MessageKind.MODERATOR_CLARIFICATION,
                     author_member_id=author_member_id,
                     request_id=request.id,

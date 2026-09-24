@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import and_, case, distinct, func, or_
 from sqlalchemy.orm import Session
 
+from src.domain.intent_status import IntentStatus
 from src.domain.message_role import PARTICIPANT_KINDS, MessageKind
 from src.domain.message_status import MessageWorkflowStatus
 from src.models import Message, Requests
@@ -61,15 +62,19 @@ class RequestManager:
         *,
         group_id: UUID,
         member_id: UUID,
-    ) -> Requests | None:
-        """The most recent live request that reached this member.
+    ) -> list[Requests]:
+        """Every live request that reached this member, newest fan-out first.
 
         A fan-out copy records its recipient in ``member_id``, so participation
         is a lookup over explicit columns: no time window, no
         ``parent_message_id`` traversal, no inferred relationship. This is what
         lets a responder's "I have one" join the request it answers.
+
+        One member can be on several open fan-outs at once. Returning only the
+        newest would drop the rest before anything can weigh them. Duplicate
+        copies of the same request collapse to one row.
         """
-        return (
+        rows = (
             db.query(Requests)
             .join(Message, Message.request_id == Requests.id)
             .filter(
@@ -79,8 +84,16 @@ class RequestManager:
                 Message.member_id == member_id,
             )
             .order_by(Message.created_at.desc())
-            .first()
+            .all()
         )
+        seen: set[int] = set()
+        unique: list[Requests] = []
+        for request in rows:
+            if request.id in seen:
+                continue
+            seen.add(request.id)
+            unique.append(request)
+        return unique
 
     def create(
         self,
@@ -94,6 +107,7 @@ class RequestManager:
             group_id=group_id,
             requester_id=requester_id,
             status="open",
+            intent_status=IntentStatus.PENDING.value,
             expires_at=expires_at,
             # Explicit rather than left to the column default: a request is
             # created microseconds before its original message, and an idle
@@ -146,6 +160,51 @@ class RequestManager:
         db.add(request)
         db.flush()
         return request
+
+    def claim_intent_ready(self, db: Session, request_id: int) -> bool:
+        """pending or failed -> ready. False when another worker already won."""
+        updated = (
+            db.query(Requests)
+            .filter(
+                Requests.id == request_id,
+                Requests.intent_status.in_(
+                    (IntentStatus.PENDING.value, IntentStatus.FAILED.value)
+                ),
+            )
+            .update(
+                {"intent_status": IntentStatus.READY.value},
+                synchronize_session=False,
+            )
+        )
+        return updated == 1
+
+    def mark_intent_failed(self, db: Session, request_id: int) -> None:
+        """Leave a failed discovery retryable. Does not touch delivery."""
+        (
+            db.query(Requests)
+            .filter(
+                Requests.id == request_id,
+                Requests.intent_status.in_(
+                    (IntentStatus.PENDING.value, IntentStatus.FAILED.value)
+                ),
+            )
+            .update(
+                {"intent_status": IntentStatus.FAILED.value},
+                synchronize_session=False,
+            )
+        )
+
+    def list_ids_for_intent_discovery(self, db: Session) -> list[int]:
+        rows = (
+            db.query(Requests.id)
+            .filter(
+                Requests.intent_status.in_(
+                    (IntentStatus.PENDING.value, IntentStatus.FAILED.value)
+                )
+            )
+            .all()
+        )
+        return [row[0] for row in rows]
 
     def complete(self, db: Session, request: Requests) -> Requests:
         return self._close(db, request, status="completed", field="completed_at")

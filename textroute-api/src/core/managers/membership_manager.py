@@ -22,6 +22,40 @@ class MembershipManager:
         normalized = normalize_phone_number(phone_number)
         return db.query(Member).filter(Member.phone_number == normalized).first()
 
+    def get_display_names(
+        self,
+        db: Session,
+        *,
+        group_id: UUID,
+        member_ids,
+    ) -> dict[UUID, str | None]:
+        """What to call these members *in this group*, keyed by member id.
+
+        Group-scoped, because ``member_profiles.display_name`` is: the same
+        person is "Brother Mecham" in one group and "shasta" in another. Falls
+        back to ``members.name``, matching how the moderator UI names people, so
+        an outbound SMS and the thread it appears in agree.
+
+        One statement for however many members, rather than a query per author.
+        """
+        ids = list(member_ids)
+        if not ids:
+            return {}
+        rows = (
+            db.query(Member.id, MemberProfile.display_name, Member.name)
+            .join(GroupMembership, GroupMembership.member_id == Member.id)
+            .outerjoin(
+                MemberProfile,
+                MemberProfile.membership_id == GroupMembership.id,
+            )
+            .filter(
+                GroupMembership.group_id == group_id,
+                Member.id.in_(ids),
+            )
+            .all()
+        )
+        return {row.id: (row.display_name or row.name) for row in rows}
+
     def get_or_create_by_phone(
         self,
         db: Session,

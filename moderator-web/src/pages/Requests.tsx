@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   approveMessage,
@@ -81,6 +81,8 @@ export function Requests() {
   // endpoint knows who is eligible to receive it.
   const [pending, setPending] = useState<ModerationMessage | null>(null);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
+  // Identifies the most recent detail load, so slower earlier ones are ignored.
+  const detailToken = useRef(0);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -112,10 +114,18 @@ export function Requests() {
   }, []);
 
   const loadDetail = useCallback(async (id: number) => {
+    // Clicking through requests leaves several loads in flight at once, and
+    // they can resolve in any order: two awaits here, each a separate round
+    // trip. Without this token the slowest response wins and the pane shows a
+    // request the moderator has already navigated away from.
+    const token = ++detailToken.current;
+    const current = () => token === detailToken.current;
+
     setBusy(true);
     setError(null);
     try {
       const loaded = await fetchRequest(id);
+      if (!current()) return;
       setDetail(loaded);
 
       // A thread message waiting on a human means this request needs a
@@ -129,12 +139,14 @@ export function Requests() {
         return;
       }
       const message = await fetchMessage(awaiting.id);
+      if (!current()) return;
       setPending(message);
       setChosen(suggestedIds(message));
     } catch (requestError) {
+      if (!current()) return;
       setError(messageOf(requestError, "Failed to load request"));
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }, []);
 
@@ -149,6 +161,11 @@ export function Requests() {
       return;
     }
     setDraft("");
+    // Drop the previous request's approval block immediately. It is keyed to a
+    // message id, so leaving it up while the next request loads would offer
+    // Approve for a message that is not in the thread on screen.
+    setPending(null);
+    setChosen(new Set());
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
@@ -374,7 +391,10 @@ export function Requests() {
         </section>
 
         <section>
-          {detail ? (
+          {/* Only ever render the request that is actually selected. The token
+              above stops stale writes; this makes showing the wrong thread
+              structurally impossible rather than merely unlikely. */}
+          {detail && detail.id === selectedId ? (
             <RequestPanel
               detail={detail}
               pending={pending}

@@ -1,5 +1,5 @@
-select
-	m.phone_number as member_number , pn.phone_number as inbound_number
+select distinct
+	m.phone_number as member_number , pn.phone_number as inbound_number, m."name" , g."name" 
 from
 	public.members m
 inner join public.group_memberships gm 
@@ -14,3 +14,12 @@ on
 where
 	gm.status = 'active'
 	and gm."role" = 'moderator'
+	
+	
+	
+	
+	truncate table messages cascade
+	
+	truncate table request_events cascade
+	
+	truncate table requests cascade

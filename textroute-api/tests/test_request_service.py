@@ -239,6 +239,7 @@ def test_moderator_message_is_attributed_to_its_author():
         member=requester
     )
     membership_mgr.get_membership.return_value = None
+    membership_mgr.get_display_names.return_value = {moderator_id: "Austin"}
 
     messaging = MagicMock()
     messaging.send_message.return_value = SimpleNamespace(id=uuid4())
@@ -269,6 +270,10 @@ def test_moderator_message_is_attributed_to_its_author():
     assert sent["to_member"] is requester
     assert sent["request_id"] == 7
     assert sent["body"] == "Which day works for you?"
+    # The recipient sees the group's number, so the question would otherwise read
+    # as coming from the group. "(Moderator)" is added from the kind, downstream.
+    assert sent["sender_name"] == "Austin"
+    assert membership_mgr.get_display_names.call_args.kwargs["group_id"] == GROUP_ID
 
 
 def test_moderator_message_defaults_to_the_requester_alone():

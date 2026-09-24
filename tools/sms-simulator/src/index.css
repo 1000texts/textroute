@@ -183,6 +183,13 @@ body {
     backdrop-filter: blur(20px);
     border-bottom: 0.5px solid var(--hairline);
     flex-shrink: 0;
+    /* backdrop-filter makes this a stacking context, which traps every z-index
+       inside it -- including the number menu's. So the menu can only clear the
+       chat bubbles (position: relative, and therefore painted after unpositioned
+       content) if the whole nav bar is lifted above them from out here. Raising
+       the menu's own z-index has no effect. */
+    position: relative;
+    z-index: 5;
 }
 
 .nav-back,
@@ -209,6 +216,9 @@ body {
     flex-direction: column;
     align-items: center;
     min-width: 0;
+    /* Anchors the absolutely-positioned menus. */
+    position: relative;
+    z-index: 1;
 }
 
 .avatar,
@@ -271,6 +281,217 @@ body {
     color: var(--muted);
     width: auto;
     max-width: 70%;
+}
+
+.number-field {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.number-field.to input {
+    font-size: 13px;
+    font-weight: 600;
+    color: #000;
+    line-height: 1.2;
+    width: auto;
+    max-width: 100%;
+    /* Sized to the text so the caret sits next to the number rather than at the
+       far edge of the nav bar. */
+    field-sizing: content;
+}
+
+.number-field.from input {
+    font-size: 10px;
+    color: var(--muted);
+    width: auto;
+    max-width: 100%;
+    field-sizing: content;
+}
+
+.number-field-alias {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 1;
+    min-width: 0;
+}
+
+.number-field.to .number-field-alias {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.number-field.from .number-field-alias {
+    font-size: 10px;
+}
+
+.number-caret {
+    border: 0;
+    background: transparent;
+    padding: 0 2px;
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.number-caret svg {
+    width: 8px;
+    height: 5px;
+    display: block;
+}
+
+.number-caret[aria-expanded="true"] svg {
+    transform: rotate(180deg);
+}
+
+.number-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 208px;
+    max-width: 280px;
+    background: rgba(252, 252, 252, 0.98);
+    backdrop-filter: blur(20px);
+    border: 0.5px solid var(--hairline);
+    border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+    overflow: hidden;
+    /* Only has to beat its siblings inside .nav-contact; clearing the chat is
+       .nav-bar's job. A large number here would be misleading. */
+    z-index: 2;
+}
+
+.number-menu-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    max-height: 208px;
+    overflow-y: auto;
+}
+
+.number-menu-list li {
+    display: flex;
+    align-items: center;
+}
+
+/* Reveal the remove button on hover so the resting list stays a plain list of
+   numbers, but keep it visible on keyboard focus. */
+.number-menu-forget {
+    opacity: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 4px;
+    margin-right: 4px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.number-menu-list li:hover .number-menu-forget,
+.number-menu-forget:focus-visible {
+    opacity: 1;
+}
+
+.number-menu-forget:hover {
+    background: rgba(255, 59, 48, 0.12);
+    color: #ff3b30;
+}
+
+.number-menu-forget svg {
+    width: 9px;
+    height: 9px;
+    display: block;
+}
+
+.number-menu-actions {
+    display: flex;
+    justify-content: flex-end;
+    border-top: 0.5px solid var(--hairline);
+    padding: 4px 6px;
+}
+
+.number-menu-actions button {
+    border: 0;
+    background: transparent;
+    font-family: inherit;
+    font-size: 11px;
+    color: #ff3b30;
+    padding: 3px 4px;
+    cursor: pointer;
+}
+
+.number-menu-option {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    font-family: inherit;
+    font-size: 12px;
+    color: #000;
+    text-align: left;
+    cursor: pointer;
+}
+
+.number-menu-option:hover {
+    background: rgba(0, 122, 255, 0.1);
+}
+
+.number-menu-option.selected {
+    color: var(--ios-blue);
+    font-weight: 600;
+}
+
+.number-menu-number {
+    font-variant-numeric: tabular-nums;
+}
+
+.number-menu-name {
+    color: var(--muted);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.number-menu-empty {
+    padding: 8px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.number-menu-rename {
+    display: block;
+    border-top: 0.5px solid var(--hairline);
+    padding: 6px 8px;
+}
+
+.number-menu-rename input {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    outline: none;
+    font-family: inherit;
+    font-size: 11px;
+    color: #000;
+    padding: 2px 0;
+    text-align: left;
 }
 
 .container {
@@ -406,45 +627,41 @@ body {
         radial-gradient(circle at 100% 0, transparent 16px, var(--sms-green) 16.5px);
 }
 
-.bubble.typing {
-    min-width: 58px;
-    padding: 12px 16px 10px;
-}
-
-.typing-dots {
-    display: flex;
-    gap: 5px;
-    align-items: center;
-    height: 14px;
-}
-
-.typing-dots span {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: #8d8d92;
-    animation: typing 1.2s infinite ease-in-out;
-}
-
-.typing-dots span:nth-child(2) {
-    animation-delay: 0.15s;
-}
-
-.typing-dots span:nth-child(3) {
-    animation-delay: 0.3s;
-}
-
-@keyframes typing {
-    0%,
-    80%,
-    100% {
-        transform: translateY(0);
-        opacity: 0.4;
+/* Rows are keyed by the server's message id, so a row only mounts when a
+   genuinely new message arrives -- which is exactly when this should play. It
+   replaces the old typing indicator: a reply can now wait on a moderator, so
+   there is nothing honest to animate between sending and receiving. */
+@keyframes message-in {
+    from {
+        opacity: 0;
+        transform: translateY(6px) scale(0.98);
     }
-    40% {
-        transform: translateY(-3px);
+    to {
         opacity: 1;
+        transform: none;
     }
+}
+
+.row {
+    animation: message-in 220ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .row {
+        animation: none;
+    }
+}
+
+/* Reserved for the things a real handset would never show: an unreachable
+   server, a rejected number. */
+.chat-notice {
+    margin: 10px auto 2px;
+    padding: 6px 12px;
+    border-radius: 12px;
+    background: rgba(255, 69, 58, 0.14);
+    color: #ff6961;
+    font-size: 12.5px;
+    text-align: center;
 }
 
 .input {

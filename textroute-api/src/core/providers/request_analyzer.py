@@ -79,7 +79,18 @@ class RequestAnalyzer:
         from src.ai.extraction import analyze_request_payload
 
         intent, _schema, extracted = analyze_request_payload(text)
-        filters = extracted.model_dump(exclude_none=True)
+        # ``mode="json"`` because these filters are stored in a JSONB column, and
+        # every intent schema carries datetime fields (``created_at``, and dates
+        # like ``borrow_date`` or ``expires_at``). A Python ``datetime`` reaches
+        # the driver unserializable and raises at flush -- after this method has
+        # returned, so the degrade-to-keywords guard above cannot catch it, and
+        # the inbound SMS is lost rather than downgraded.
+        filters = extracted.model_dump(mode="json", exclude_none=True)
+        # The schemas default ``created_at`` to now, so it is not extracted from
+        # the message at all -- the model never saw it. Keeping it would put a
+        # timestamp in the moderator's summary and imply the SMS said something
+        # about time. ``requests.created_at`` already records arrival.
+        filters.pop("created_at", None)
 
         return RequestAnalysis(
             request_type=intent.intent,

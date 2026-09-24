@@ -63,6 +63,13 @@ class Requests(Base):
         server_default=text("'open'"),
     )
     request_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # pending until analysis and this status commit together. ready means
+    # request_type on this row is usable. Delivery does not read it.
+    intent_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'pending'"),
+    )
     extracted_filters: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,
@@ -136,6 +143,10 @@ class Requests(Base):
         CheckConstraint(
             "status IN ('open', 'completed', 'cancelled', 'expired')",
             name="requests_status_check",
+        ),
+        CheckConstraint(
+            "intent_status IN ('pending', 'ready', 'failed')",
+            name="requests_intent_status_check",
         ),
         CheckConstraint(
             "jsonb_typeof(extracted_filters) = 'object'",

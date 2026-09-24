@@ -50,6 +50,7 @@ def _service(
     routing_service=None,
     request_manager=None,
     request_event_manager=None,
+    embed_text=None,
 ) -> InboundMessageService:
     return InboundMessageService(
         phone_number_manager=phone_number_manager or MagicMock(),
@@ -59,6 +60,7 @@ def _service(
         routing_service=routing_service or MagicMock(),
         request_manager=request_manager or _request_manager(),
         request_event_manager=request_event_manager or MagicMock(),
+        embed_text=embed_text,
     )
 
 
@@ -514,8 +516,8 @@ def test_reply_into_an_open_request_is_recorded_without_processing():
     assert created["parent_message_id"] == parent_id
 
 
-def test_a_senders_own_open_request_takes_precedence():
-    """A requester's follow-up joins their own request, not one they received."""
+def test_a_senders_own_open_request_is_the_reply_when_it_is_the_only_one():
+    """One live request, their own, is a reply. Nothing is weighed."""
     db = MagicMock()
     group_id = uuid4()
     member_id = uuid4()
@@ -542,10 +544,9 @@ def test_a_senders_own_open_request_takes_precedence():
         workflow_status=MessageWorkflowStatus.RECEIVED.value,
     )
 
-    own = SimpleNamespace(id=5, original_message_id=uuid4())
-    someone_elses = SimpleNamespace(id=9, original_message_id=uuid4())
+    own = SimpleNamespace(id=5, original_message_id=uuid4(), requester_id=member_id)
     request_mgr = _request_manager(own)
-    request_mgr.find_open_for_participant.return_value = someone_elses
+    request_mgr.find_open_for_participant.return_value = []
 
     service = _service(
         phone_number_manager=phone_mgr,
@@ -562,7 +563,7 @@ def test_a_senders_own_open_request_takes_precedence():
     )
 
     assert result["request_id"] == 5
-    request_mgr.find_open_for_participant.assert_not_called()
+    request_mgr.find_open_for_participant.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -772,14 +773,15 @@ def test_auto_group_with_no_eligible_recipients_skips_fanout():
         _routing_fixtures(routing_policy="auto_group")
     )
 
-    # The sender is still an active member; the suggested recipient's membership
-    # lapsed between suggestion and send, leaving nobody to route to.
-    sender_membership = SimpleNamespace(id=uuid4())
-
-    def get_active_membership(db, member_id, group_id):
-        return None if member_id == other.id else sender_membership
-
-    membership_mgr.get_active_membership.side_effect = get_active_membership
+    # The sender is the only active member, so there is nobody else to route to.
+    sender = SimpleNamespace(
+        id=message_mgr.create_inbound.return_value.member_id,
+        phone_number="+15551234567",
+        name="A",
+    )
+    membership_mgr.list_active_memberships.return_value = [
+        SimpleNamespace(member=sender, role="member"),
+    ]
 
     service = _service(
         phone_number_manager=phone_mgr,
@@ -799,3 +801,323 @@ def test_auto_group_with_no_eligible_recipients_skips_fanout():
 
     routing.fan_out.assert_not_called()
     assert result["processing"] == "auto_routing_skipped_no_recipients"
+
+
+def _two_request_fixtures():
+    db = MagicMock()
+    group_id = uuid4()
+    member_id = uuid4()
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
+    )
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=member_id, phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+    saw = SimpleNamespace(
+        id=21,
+        original_message_id=None,
+        requester_id=uuid4(),
+        summary="Borrow a saw",
+    )
+    bike = SimpleNamespace(
+        id=22,
+        original_message_id=None,
+        requester_id=uuid4(),
+        summary="Borrow a bicycle",
+    )
+    request_mgr = _request_manager()
+    request_mgr.find_open_for_participant.return_value = [saw, bike]
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.return_value = None
+    message_mgr.find_pending_clarification.return_value = None
+    message_mgr.create_inbound.return_value = SimpleNamespace(
+        id=uuid4(),
+        parent_message_id=saw.original_message_id,
+        workflow_status=MessageWorkflowStatus.RECEIVED.value,
+    )
+    pending = SimpleNamespace(id=uuid4())
+    message_mgr.create_pending_choice.return_value = pending
+    return db, phone_mgr, membership_mgr, message_mgr, request_mgr, saw, member_id, group_id
+
+
+def test_one_open_request_does_not_embed():
+    """One live request is a reply. Similarity is not consulted."""
+    db = MagicMock()
+    group_id = uuid4()
+    member_id = uuid4()
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id, routing_policy="auto_group"),
+    )
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=member_id, phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.return_value = None
+    message_mgr.find_pending_clarification.return_value = None
+    message_mgr.create_inbound.return_value = SimpleNamespace(
+        id=uuid4(),
+        parent_message_id=uuid4(),
+        workflow_status=MessageWorkflowStatus.RECEIVED.value,
+    )
+    only = SimpleNamespace(id=7, original_message_id=uuid4(), summary="Borrow a saw")
+    request_mgr = _request_manager()
+    request_mgr.find_open_for_participant.return_value = [only]
+
+    def embed(_text):
+        raise AssertionError("a single candidate must not be embedded")
+
+    routing = MagicMock()
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=request_mgr,
+        routing_service=routing,
+        embed_text=embed,
+    )
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="I just sharpened it",
+    )
+    assert result["kind"] == "member_reply"
+    assert result["request_id"] == 7
+    routing.fan_out.assert_not_called()
+
+
+def test_clarification_letters_follow_candidate_order_and_reserve_n():
+    """Own request is A, fan-outs follow, and N is omitted when they already have one."""
+    db, phone_mgr, membership_mgr, message_mgr, request_mgr, _, member_id, _ = (
+        _two_request_fixtures()
+    )
+    own = SimpleNamespace(
+        id=20,
+        original_message_id=None,
+        requester_id=member_id,
+        summary="My own request",
+    )
+    other_b = SimpleNamespace(
+        id=21,
+        original_message_id=None,
+        requester_id=uuid4(),
+        summary="Someone else's request",
+    )
+    other_c = SimpleNamespace(
+        id=22,
+        original_message_id=None,
+        requester_id=uuid4(),
+        summary="Another request",
+    )
+    request_mgr.find_open_for_requester.return_value = own
+    request_mgr.find_open_for_participant.return_value = [own, other_c, other_b]
+
+    def embed(_text):
+        return [1.0, 0.0]
+
+    routing = MagicMock()
+    routing.resolve_from_number.return_value = "+15559876543"
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=request_mgr,
+        routing_service=routing,
+        embed_text=embed,
+    )
+    service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="I just sharpened it",
+    )
+    sent = routing.messaging_service.send_message.call_args.kwargs["body"]
+    assert sent.index("A) My own request") < sent.index("B) Another request")
+    assert sent.index("B) Another request") < sent.index("C) Someone else's request")
+    assert "N)" not in sent
+    stored = message_mgr.create_pending_choice.call_args.kwargs["choices"]
+    assert list(stored) == ["A", "B", "C"]
+    assert stored["A"]["request_id"] == 20
+    assert stored["B"]["request_id"] == 22
+    assert stored["C"]["request_id"] == 21
+
+
+def test_two_open_requests_attach_the_clear_similarity_winner():
+    db, phone_mgr, membership_mgr, message_mgr, request_mgr, saw, _, _ = (
+        _two_request_fixtures()
+    )
+
+    def embed(text):
+        if "bicycle" in text:
+            return [0.0, 1.0]
+        return [1.0, 0.0]
+
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=request_mgr,
+        embed_text=embed,
+    )
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="I just sharpened it",
+    )
+    assert result["kind"] == "member_reply"
+    assert result["request_id"] == saw.id
+    message_mgr.create_pending_choice.assert_not_called()
+
+
+def test_two_open_requests_ask_when_the_scores_are_close():
+    db, phone_mgr, membership_mgr, message_mgr, request_mgr, _, _, _ = (
+        _two_request_fixtures()
+    )
+
+    def embed(text):
+        if "bicycle" in text:
+            return [0.98, 0.2]
+        return [1.0, 0.0]
+
+    routing = MagicMock()
+    routing.resolve_from_number.return_value = "+15559876543"
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=request_mgr,
+        routing_service=routing,
+        embed_text=embed,
+    )
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="I just sharpened it",
+    )
+    assert result["processing"] == "clarification_requested"
+    assert result["request_id"] is None
+    message_mgr.create_inbound.assert_not_called()
+    sent = routing.messaging_service.send_message.call_args.kwargs["body"]
+    assert "A) Borrow a saw" in sent
+    assert "B) Borrow a bicycle" in sent
+    assert "N) This is a new request" in sent
+
+
+def test_letter_attaches_the_held_message_as_a_reply():
+    db = MagicMock()
+    group_id = uuid4()
+    member_id = uuid4()
+    parent_id = uuid4()
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
+    )
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=member_id, phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+    pending = SimpleNamespace(
+        id=uuid4(),
+        parent_message_id=None,
+        workflow_status=MessageWorkflowStatus.RECEIVED.value,
+        constraints={
+            "clarification": {
+                "A": {"request_id": 21, "label": "Borrow a saw"},
+                "N": {"request_id": None, "label": "This is a new request"},
+            }
+        },
+    )
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.return_value = None
+    message_mgr.find_pending_clarification.return_value = pending
+    request = SimpleNamespace(id=21, original_message_id=parent_id)
+    request_mgr = _request_manager()
+    request_mgr.find_by_id.return_value = request
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=request_mgr,
+    )
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="A",
+    )
+    assert result["kind"] == "member_reply"
+    assert result["request_id"] == 21
+    attached = message_mgr.attach_held_message.call_args
+    assert attached.kwargs["kind"] is MessageKind.MEMBER_REPLY
+    assert attached.kwargs["request_id"] == 21
+    request_mgr.find_open_for_participant.assert_not_called()
+
+
+def test_unrecognized_letter_asks_again():
+    db = MagicMock()
+    group_id = uuid4()
+    member_id = uuid4()
+    phone_mgr = MagicMock()
+    phone_mgr.find_by_number.return_value = SimpleNamespace(
+        id=uuid4(),
+        phone_number="+15559876543",
+        group_id=group_id,
+        status="assigned",
+        group=SimpleNamespace(id=group_id, routing_policy="moderator_required"),
+    )
+    membership_mgr = MagicMock()
+    membership_mgr.get_by_phone.return_value = SimpleNamespace(
+        id=member_id, phone_number="+15551234567"
+    )
+    membership_mgr.get_active_membership.return_value = SimpleNamespace(id=uuid4())
+    pending = SimpleNamespace(
+        id=uuid4(),
+        constraints={
+            "clarification": {
+                "A": {"request_id": 21, "label": "Borrow a saw"},
+            }
+        },
+    )
+    message_mgr = MagicMock()
+    message_mgr.find_by_provider_message_id.return_value = None
+    message_mgr.find_pending_clarification.return_value = pending
+    routing = MagicMock()
+    routing.resolve_from_number.return_value = "+15559876543"
+    service = _service(
+        phone_number_manager=phone_mgr,
+        membership_manager=membership_mgr,
+        message_manager=message_mgr,
+        request_manager=_request_manager(),
+        routing_service=routing,
+    )
+    result = service.handle_incoming_message(
+        db,
+        from_phone_number="+15551234567",
+        to_phone_number="+15559876543",
+        body="yes I have one",
+    )
+    assert result["processing"] == "clarification_requested"
+    message_mgr.attach_held_message.assert_not_called()
+    sent = routing.messaging_service.send_message.call_args.kwargs["body"]
+    assert "A) Borrow a saw" in sent

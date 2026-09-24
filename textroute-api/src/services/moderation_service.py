@@ -126,6 +126,10 @@ class ModerationService:
             MessageWorkflowStatus.MODERATOR_REJECTED.value,
             processing_notes="moderator_rejected",
         )
+        # No request event, deliberately: the event vocabulary records what
+        # happened *to* a request, and a rejection stops anything from
+        # happening. It also leaves the request open, so the requester can still
+        # be answered by hand or send something better.
         db.commit()
         return self._message_summary(db, message)
 
@@ -141,7 +145,12 @@ class ModerationService:
         if not recipient_ids:
             raise InvalidRecipientsError("At least one recipient is required.")
 
+        # Deduplicated while preserving order: the list arrives from a browser,
+        # and a repeated id would otherwise send the same person the same SMS
+        # twice.
         unique_ids = list(dict.fromkeys(recipient_ids))
+        # Routing a request back to the person who asked it is always a mistake,
+        # and it would also make them a participant in their own fan-out.
         if message.member_id is not None and message.member_id in unique_ids:
             raise InvalidRecipientsError("Cannot route a message to its sender.")
 
@@ -176,8 +185,13 @@ class ModerationService:
         try:
             delivery = self.routing_service.fan_out(db, message, recipients)
         except RoutingError as exc:
+            # Delivery could not even be attempted (no group number, say). The
+            # approval above is already committed, so the moderator's decision
+            # survives and the send can be retried once the cause is fixed.
             raise ModerationError(str(exc)) from exc
 
+        # The caller is told what actually happened rather than that it was
+        # approved: a fan-out can partially fail, and only fan_out knows.
         summary = self._message_summary(db, message)
         summary.update(delivery)
         return summary
@@ -191,6 +205,9 @@ class ModerationService:
         message = self._find_group_message(db, message_id, group_id)
         if message is None:
             raise MessageNotFoundError("Message not found.")
+        # The status is the guard against acting twice: two moderators with the
+        # queue open both see the message, and whoever clicks second gets this
+        # error rather than a second fan-out.
         if message.workflow_status != MessageWorkflowStatus.AWAITING_MODERATOR.value:
             raise InvalidModerationStateError(
                 f"Message is not awaiting moderator "
@@ -217,6 +234,12 @@ class ModerationService:
         group_id: UUID,
         recipient_ids: list[UUID],
     ) -> list[Member]:
+        """Every id must resolve to an active member, or nothing is sent.
+
+        Unlike policy routing, which skips anyone whose membership lapsed, a
+        moderator named these people explicitly. Quietly dropping one would send
+        to a different audience than the one they approved.
+        """
         members: list[Member] = []
         for member_id in recipient_ids:
             membership = self.membership_manager.get_active_membership(
@@ -241,12 +264,17 @@ class ModerationService:
             return None
         member = db.query(Member).filter(Member.id == member_id).first()
         if member is None:
+            # A deleted member still appears in stored recipient id lists, so
+            # return the bare id rather than dropping the row and making the
+            # audit trail disagree with itself about how many were sent to.
             return {"id": str(member_id)}
         membership = self.membership_manager.get_membership(
             db,
             member_id=member.id,
             group_id=group_id,
         )
+        # A per-group display name wins over the member's global one: the same
+        # person can be "Dad" in one group and "Ken Kahara" in another.
         profile = membership.profile if membership is not None else None
         return {
             "id": str(member.id),
@@ -269,6 +297,8 @@ class ModerationService:
             brief = self._member_brief(db, member_id, group_id) or {
                 "id": str(member_id)
             }
+            # Looked up both ways because reasons may come from memory (UUID
+            # keys) or from a JSONB column, which turns every key into a string.
             if reasons and member_id in reasons:
                 brief["reason"] = reasons[member_id]
             elif reasons and str(member_id) in reasons:
@@ -285,6 +315,9 @@ class ModerationService:
             "group_id": str(message.group_id),
             "body": message.body,
             "workflow_status": message.workflow_status,
+            # The analysis as it stood when this message was routed. The request
+            # carries the current understanding; these two can diverge if a
+            # request is re-analyzed, which is why both are kept.
             "intent": message.intent,
             "confidence": message.confidence,
             "constraints": message.constraints,
@@ -312,6 +345,11 @@ class ModerationService:
         }
 
     def _message_detail(self, db: Session, message: Message) -> dict:
+        """The summary plus everyone the moderator could choose to send to.
+
+        Only the detail view carries this, because it is what the approve form
+        needs; the queue and feed would pay for the whole membership per row.
+        """
         detail = self._message_summary(db, message)
         memberships = self.membership_manager.list_active_memberships(
             db, message.group_id
@@ -326,12 +364,16 @@ class ModerationService:
                 ),
                 "phone_number": m.member.phone_number,
                 "role": m.role,
+                # A hint the UI pre-ticks, not a decision: the model suggested
+                # these, and the moderator is free to ignore every one.
                 "suggested": (
                     message.suggested_recipient_ids is not None
                     and m.member.id in message.suggested_recipient_ids
                 ),
             }
             for m in memberships
+            # The sender is excluded here for the same reason approve() rejects
+            # them, so the form cannot offer a choice the service would refuse.
             if m.member is not None and m.member_id != message.member_id
         ]
         return detail

@@ -12,11 +12,17 @@ from src.domain.message_status import MessageWorkflowStatus
 from src.services.routing_service import RoutingError, RoutingService
 
 
+REQUESTER_ID = uuid4()
+
+
 def _message(status: str, group_id, **overrides):
     base = dict(
         id=uuid4(),
         group_id=group_id,
-        member_id=uuid4(),
+        member_id=REQUESTER_ID,
+        # The requester wrote it, so they are its author. Fan-out reads this to
+        # find out whose name goes on the copies.
+        author_member_id=REQUESTER_ID,
         request_id=42,
         body="Does anyone have a ladder?",
         workflow_status=status,
@@ -45,6 +51,12 @@ def _managers():
     return message_mgr, phone_mgr
 
 
+def _membership_manager(name="Naruto"):
+    manager = MagicMock()
+    manager.get_display_names.return_value = {REQUESTER_ID: name}
+    return manager
+
+
 def _recorded_events(event_mgr) -> list[str]:
     return [c.kwargs["event_type"].value for c in event_mgr.record.call_args_list]
 
@@ -69,28 +81,90 @@ def test_fan_out_accepts_both_routes_to_delivery(status):
     messaging.send_message.return_value = outbound
 
     event_mgr = MagicMock()
+    membership_mgr = _membership_manager()
     service = RoutingService(
         message_manager=message_mgr,
         phone_number_manager=phone_mgr,
         messaging_service=messaging,
         request_event_manager=event_mgr,
+        membership_manager=membership_mgr,
     )
     result = service.fan_out(db, message, [recipient])
 
     assert message.workflow_status == MessageWorkflowStatus.DELIVERED.value
     assert result["delivered_outbound_ids"] == [str(outbound.id)]
-    # The inbound body is forwarded unchanged, parented to the original request
-    # and carried into the same request thread.
+    # The body is handed over unchanged, parented to the original request and
+    # carried into the same request thread. Composing the text that goes on the
+    # wire is MessagingService's job, so the prefix is not applied here.
     sent = messaging.send_message.call_args.kwargs
     assert sent["body"] == message.body
     assert sent["parent_message_id"] == message.id
     assert sent["request_id"] == message.request_id
-    # A copy is a system artefact: recipient in member_id, nobody as author.
+    # A copy is a system artefact: recipient in member_id, nobody as author. The
+    # name still has to travel, or the recipient could not tell who is asking.
     assert sent["kind"] is MessageKind.FANOUT_COPY
     assert sent["to_member"] is recipient
     assert sent.get("author_member_id") is None
+    assert sent["sender_name"] == "Naruto"
+    # Group-scoped, since the same person may be known by another name elsewhere.
+    assert membership_mgr.get_display_names.call_args.kwargs["group_id"] == group_id
 
     assert _recorded_events(event_mgr) == ["delivered"]
+
+
+def test_fan_out_resolves_the_authors_name_once_for_every_recipient():
+    """A name lookup per copy would be a query per recipient."""
+    db = MagicMock()
+    group_id = uuid4()
+    message = _message(MessageWorkflowStatus.APPROVED.value, group_id)
+    recipients = [
+        SimpleNamespace(id=uuid4(), phone_number=f"+1555222222{n}", name=f"R{n}")
+        for n in range(4)
+    ]
+
+    message_mgr, phone_mgr = _managers()
+    messaging = MagicMock()
+    messaging.send_message.return_value = SimpleNamespace(id=uuid4())
+    membership_mgr = _membership_manager()
+
+    service = RoutingService(
+        message_manager=message_mgr,
+        phone_number_manager=phone_mgr,
+        messaging_service=messaging,
+        request_event_manager=MagicMock(),
+        membership_manager=membership_mgr,
+    )
+    service.fan_out(db, message, recipients)
+
+    assert membership_mgr.get_display_names.call_count == 1
+    assert messaging.send_message.call_count == 4
+    assert all(
+        call.kwargs["sender_name"] == "Naruto"
+        for call in messaging.send_message.call_args_list
+    )
+
+
+def test_fan_out_sends_without_a_name_when_the_author_has_none():
+    """Better an unattributed message than a broken prefix like ": ..."."""
+    db = MagicMock()
+    group_id = uuid4()
+    message = _message(MessageWorkflowStatus.APPROVED.value, group_id)
+    recipient = SimpleNamespace(id=uuid4(), phone_number="+15552222222", name="A")
+
+    message_mgr, phone_mgr = _managers()
+    messaging = MagicMock()
+    messaging.send_message.return_value = SimpleNamespace(id=uuid4())
+
+    service = RoutingService(
+        message_manager=message_mgr,
+        phone_number_manager=phone_mgr,
+        messaging_service=messaging,
+        request_event_manager=MagicMock(),
+        membership_manager=_membership_manager(name=None),
+    )
+    service.fan_out(db, message, [recipient])
+
+    assert messaging.send_message.call_args.kwargs["sender_name"] is None
 
 
 def test_fan_out_rejects_message_not_cleared_for_delivery():
@@ -133,6 +207,7 @@ def test_fan_out_partial_failure_sets_partially_delivered():
         phone_number_manager=phone_mgr,
         messaging_service=messaging,
         request_event_manager=event_mgr,
+        membership_manager=_membership_manager(),
     )
     result = service.fan_out(db, message, [good, bad])
 
@@ -165,6 +240,7 @@ def test_fan_out_total_failure_sets_delivery_failed():
         phone_number_manager=phone_mgr,
         messaging_service=messaging,
         request_event_manager=event_mgr,
+        membership_manager=_membership_manager(),
     )
     result = service.fan_out(db, message, [recipient])
 

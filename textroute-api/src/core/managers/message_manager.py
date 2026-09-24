@@ -1,8 +1,11 @@
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
+from src.domain.association import AWAITING_CHOICE
+from src.domain.intent_status import REPLY_CLAIMED, REPLY_DEFERRED
 from src.domain.message_role import MessageKind, build_message_role
 from src.domain.message_status import MessageWorkflowStatus
 from src.models import Message, Requests
@@ -49,6 +52,73 @@ class MessageManager:
             query = query.filter(Message.workflow_status.in_(statuses))
         return query.order_by(Message.created_at.desc()).limit(limit).all()
 
+    def list_conversation(
+        self,
+        db: Session,
+        *,
+        group_id: UUID,
+        member_id: UUID,
+        after_created_at: datetime | None = None,
+        after_id: UUID | None = None,
+        limit: int = 200,
+    ) -> list[Message]:
+        """Everything one member and one group have said to each other.
+
+        ``member_id`` is the member a row is *about* -- the sender inbound, the
+        recipient outbound -- so this pair of columns is the whole conversation,
+        in both directions, with no phone-number matching needed.
+
+        Deliberately unfiltered by ``kind``. A fan-out copy, a moderator
+        clarification and a confirmation all reach the member's handset, so all
+        of them belong here; deciding which of them *mattered* is the job of the
+        request, not of the phone.
+
+        Returned oldest first, the order a conversation is read in.
+        """
+        query = db.query(Message).filter(
+            Message.group_id == group_id,
+            Message.member_id == member_id,
+        )
+
+        if after_created_at is None or after_id is None:
+            # No cursor means the first load, which wants the newest page and
+            # then reads forwards -- hence the descending fetch and reverse. A
+            # plain ascending limit would pin the view to the oldest messages
+            # and never reach the recent ones.
+            newest_first = (
+                query.order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(limit)
+                .all()
+            )
+            return list(reversed(newest_first))
+
+        # A keyset cursor on ``created_at`` alone is not a continuation point: a
+        # fan-out writes its copies in one transaction, where ``func.now()`` is
+        # transaction time, so siblings share a timestamp exactly. ``>`` would
+        # then skip every sibling but one and never come back for them. The
+        # primary key breaks the tie and makes the cursor total.
+        #
+        # ``id`` is a random UUID, so it orders tied rows arbitrarily rather than
+        # by arrival. That is enough: paging is exact as long as the cursor and
+        # the ORDER BY agree, and rows tied to the microsecond were written in
+        # one transaction, so no arrival order exists to preserve.
+        return (
+            query.filter(
+                or_(
+                    Message.created_at > after_created_at,
+                    and_(
+                        Message.created_at == after_created_at,
+                        Message.id > after_id,
+                    ),
+                )
+            )
+            # Must match the cursor's own comparison, or rows could be ordered
+            # one way and paged another.
+            .order_by(Message.created_at.asc(), Message.id.asc())
+            .limit(limit)
+            .all()
+        )
+
     def create_inbound(
         self,
         db: Session,
@@ -81,6 +151,114 @@ class MessageManager:
             workflow_status=workflow_status,
             **build_message_role(kind=kind, member_id=member_id),
         )
+        db.add(message)
+        db.flush()
+        self._touch_request(db, request_id)
+        return message
+
+    def create_pending_choice(
+        self,
+        db: Session,
+        *,
+        group_id: UUID,
+        member_id: UUID,
+        from_phone_number: str,
+        to_phone_number: str,
+        body: str,
+        provider_message_id: str | None,
+        choices: dict,
+    ) -> Message:
+        """An inbound text whose kind is not stamped yet.
+
+        ``kind`` stays null until the sender's letter says which request it
+        belongs to. ``request_id`` stays null for the same reason.
+        """
+        message = Message(
+            group_id=group_id,
+            member_id=member_id,
+            author_member_id=member_id,
+            direction="inbound",
+            from_phone_number=from_phone_number,
+            to_phone_number=to_phone_number,
+            body=body,
+            provider_message_id=provider_message_id,
+            workflow_status=MessageWorkflowStatus.RECEIVED.value,
+            processing_notes=AWAITING_CHOICE,
+            constraints={"clarification": choices},
+        )
+        db.add(message)
+        db.flush()
+        return message
+
+    def find_pending_clarification(
+        self,
+        db: Session,
+        *,
+        group_id: UUID,
+        member_id: UUID,
+    ) -> Message | None:
+        """The sender's unanswered letter question, if they have one."""
+        return (
+            db.query(Message)
+            .filter(
+                Message.group_id == group_id,
+                Message.member_id == member_id,
+                Message.direction == "inbound",
+                Message.kind.is_(None),
+                Message.processing_notes == AWAITING_CHOICE,
+            )
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+
+    def record_choice_text(
+        self,
+        db: Session,
+        *,
+        group_id: UUID,
+        member_id: UUID,
+        from_phone_number: str,
+        to_phone_number: str,
+        body: str,
+        provider_message_id: str | None,
+        note: str,
+    ) -> Message:
+        """Persist the letter SMS itself. It is not a request and not weighed."""
+        message = Message(
+            group_id=group_id,
+            member_id=member_id,
+            author_member_id=member_id,
+            direction="inbound",
+            from_phone_number=from_phone_number,
+            to_phone_number=to_phone_number,
+            body=body,
+            provider_message_id=provider_message_id,
+            workflow_status=MessageWorkflowStatus.RECEIVED.value,
+            processing_notes=note,
+        )
+        db.add(message)
+        db.flush()
+        return message
+
+    def attach_held_message(
+        self,
+        db: Session,
+        message: Message,
+        *,
+        kind: MessageKind,
+        member_id: UUID,
+        request_id: int,
+        parent_message_id: UUID | None,
+    ) -> Message:
+        """Stamp a held inbound once the sender's letter has chosen its request."""
+        role = build_message_role(kind=kind, member_id=member_id)
+        message.kind = role["kind"]
+        message.sender_role = role["sender_role"]
+        message.member_id = role["member_id"]
+        message.author_member_id = role["author_member_id"]
+        message.request_id = request_id
+        message.parent_message_id = parent_message_id
+        message.processing_notes = "choice_applied"
         db.add(message)
         db.flush()
         self._touch_request(db, request_id)
@@ -153,6 +331,34 @@ class MessageManager:
             # leaving it alone avoids a SELECT on every message insert.
             synchronize_session=False,
         )
+
+    def claim_deferred_replies(self, db: Session, request_id: int) -> list[Message]:
+        """Flip each deferred reply to recorded. A lost race returns nothing for that row."""
+        waiting = (
+            db.query(Message)
+            .filter(
+                Message.request_id == request_id,
+                Message.processing_notes == REPLY_DEFERRED,
+            )
+            .all()
+        )
+        claimed: list[Message] = []
+        for message in waiting:
+            updated = (
+                db.query(Message)
+                .filter(
+                    Message.id == message.id,
+                    Message.processing_notes == REPLY_DEFERRED,
+                )
+                .update(
+                    {"processing_notes": REPLY_CLAIMED},
+                    synchronize_session=False,
+                )
+            )
+            if updated == 1:
+                message.processing_notes = REPLY_CLAIMED
+                claimed.append(message)
+        return claimed
 
     def set_workflow_status(
         self,

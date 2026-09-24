@@ -33,6 +33,7 @@ sys.path.insert(0, API_DIR)
 
 from src.config.config import Config  # noqa: E402
 from src.db.db import SessionLocal  # noqa: E402
+from src.services.intent_service import IntentService  # noqa: E402
 from src.services.request_service import RequestService  # noqa: E402
 
 # stdout, so cron's redirect captures it in the same log as everything else.
@@ -54,6 +55,7 @@ def main() -> int:
     db = SessionLocal()
     try:
         closed = RequestService().sweep_expired(db)
+        discovered = IntentService().discover_outstanding(db)
     except Exception:
         # Cron mails a non-zero exit, which is the only notification this has.
         logger.exception("sweep_failed")
@@ -62,7 +64,7 @@ def main() -> int:
     finally:
         db.close()
 
-    logger.info("sweep_finished closed=%d", closed)
+    logger.info("sweep_finished closed=%d intent_ready=%d", closed, discovered)
     return 0
 
 

@@ -1,3 +1,7 @@
+from typing import Any
+
+from pydantic import BaseModel
+
 from src.ai.embedding import get_dense_vector
 from src.schemas.schema_config import SCHEMA_CONFIG
 
@@ -8,8 +12,9 @@ def build_vector_query(
     # Logical schema key (e.g., "announcement", "borrow_request", "service_request")
     user_text: str,
     # Original user query text. Used to generate a dense vector embedding for vector similarity search.
-    structured_filters: dict,
+    structured_filters: BaseModel | dict[str, Any],
     # Structured, schema-aware filters extracted from user input or an LLM.
+    # Extraction returns a Pydantic model, so both forms are accepted.
     # Only fields explicitly allowed by the schema configuration will be applied.
     limit: int = 10,
     # Maximum number of results to return, ordered by vector similarity.
@@ -26,7 +31,7 @@ def build_vector_query(
     allowed_filters = config.filters
 
     # Convert Pydantic model → dict
-    if hasattr(structured_filters, "model_dump"):
+    if isinstance(structured_filters, BaseModel):
         filters_dict = structured_filters.model_dump(exclude_none=True)
     else:
         filters_dict = structured_filters  # already a dict

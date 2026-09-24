@@ -179,9 +179,11 @@ copies point at the original). It is now redundant for threading, which
 
 The inbound path makes three separate decisions rather than one:
 
-1. **Which request does this belong to?** — `find_open_for_requester` (the
-   sender's own open request), then `find_open_for_participant` (one whose
-   fan-out copy names them as recipient). Both read explicit message rows.
+1. **Which request does this belong to?** — the sender's own open request,
+   plus every open request `find_open_for_participant` finds via a fan-out
+   copy. One candidate is a reply. None is a new request. Two or more are
+   weighed by embedding similarity; a close call asks the sender to reply
+   with a letter.
 2. **What is this message?** — `determine_inbound_kind`, at the boundary, then
    stamped into `kind`.
 3. **How should an `original_request` be routed?** — `groups.routing_policy`,
@@ -261,6 +263,7 @@ second place where it could drift.
 | `POST` | `/members` | Add consented members to authenticated group |
 | `POST` | `/webhook/messages` | Inbound SMS (`from` / `to` / `body`); requires `X-Webhook-Secret` |
 | `POST` | `/webhook/inbound` | Alias of `/webhook/messages` |
+| `GET` | `/webhook/conversation` | One handset's thread: `?from=<member>&to=<group>`; requires `X-Webhook-Secret` |
 | `GET` | `/moderation/queue` | Authenticated group's review queue (source of truth for the needs-review count) |
 | `GET` | `/messages` | All inbound messages for the group, any status (max 100) |
 | `GET` | `/messages/{id}` | Message detail + eligible recipients |
@@ -272,6 +275,40 @@ second place where it could drift.
 | `POST` | `/requests/{id}/complete` | Requester got what they needed |
 | `POST` | `/requests/{id}/cancel` | Request withdrawn |
 | `GET` | `/` | Health |
+
+## Reading one handset's conversation
+
+`GET /webhook/conversation` exists for the SMS simulator, which stands in for a
+real phone in development. It is a read, but it lives under `/webhook` because
+the simulator's only credential is the webhook shared secret, and the production
+nginx vhost injects that secret for `/api/webhook/` and deliberately nothing
+else. Putting the route anywhere else would mean widening that scope.
+
+The conversation is `messages` filtered by `group_id` and `member_id`, which is
+sufficient because `member_id` is the member a row is *about*: the sender on
+inbound, the recipient on outbound. Nothing filters on `kind` — a fan-out copy,
+a moderator clarification and a confirmation all reach the handset, so all of
+them are returned. Which of them mattered is the request's concern, not the
+phone's.
+
+`body` is returned verbatim, and there is no accompanying sender field. There
+does not need to be: an outbound message already names its sender, because that
+is part of the SMS (see [Who an outbound SMS says it is from](#who-an-outbound-sms-says-it-is-from)).
+The simulator's job is to show what a real handset would, so it decorates
+nothing.
+
+Paging uses a `(created_at, id)` keyset cursor, both halves or neither:
+
+```
+?after_created_at=2026-08-29T12:00:00Z&after_id=<uuid>
+```
+
+`created_at` alone is not a continuation point. A fan-out writes its copies in
+one transaction and `func.now()` is transaction time, so the siblings share a
+timestamp exactly and `created_at > cursor` would step over all but one of them
+permanently. `scripts/verify_conversation_cursor.py` demonstrates this against a
+real database; on a four-row conversation it reports three rows that a
+timestamp-only cursor would strand.
 
 ## Workflow statuses
 
@@ -322,6 +359,41 @@ MessagingService → SmsProvider (logging | http)
 ```
 
 Set `SMS_PROVIDER=logging` (default) or `SMS_PROVIDER=http` with `SMS_PROVIDER_URL`.
+
+### Who an outbound SMS says it is from
+
+A member who receives a routed message sees only the group's TextRoute number.
+Nothing else in an SMS identifies the person asking, so the sender is part of the
+text:
+
+```
+Naruto: Can anyone watch my dog this Sunday?
+Brother Mecham (Moderator): Which day works for you?
+```
+
+`src/domain/outbound_text.py` composes this and `MessagingService.send_message`
+applies it — once, in the one place every outbound message passes through, so the
+string handed to the provider and the one stored in `messages.body` are the same.
+Anything else would leave the record claiming something other than what was sent.
+
+Three consequences worth knowing:
+
+- **Inbound is never touched.** What a member wrote is what arrived. Only the two
+  outbound kinds that carry someone's words get a prefix.
+- **The name is group-scoped.** It comes from `member_profiles.display_name`,
+  falling back to `members.name`, because the same person is `Brother Mecham` in
+  one group and `shasta` in another. The moderator UI resolves names the same
+  way, so a thread and the SMS it produced agree.
+- **A `fanout_copy` is credited to the author it copies.** The copy itself must
+  have no `author_member_id` — the system generated it — so `RoutingService`
+  reads the name off the message being fanned out and passes it explicitly. On a
+  recipient's handset the copy therefore reads as the person who asked, not as
+  nobody.
+
+`(Moderator)` is derived from `kind`, so no particular person is special-cased,
+and a member with no name on record sends an unprefixed body rather than a bare
+`": "`. Note that the prefix consumes characters from the 160-character SMS
+segment; nothing truncates today.
 
 ## Local commands
 

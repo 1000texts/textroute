@@ -22,6 +22,43 @@ class IncomingMessageRequest(BaseModel):
     provider_message_id: str | None = Field(default=None, alias="MessageSid")
 
 
+class ConversationMessageResponse(BaseModel):
+    """One message as a handset would show it.
+
+    ``direction`` places the bubble: inbound is what this member sent, outbound
+    is what the group sent them. ``kind`` and ``workflow_status`` are along for
+    debugging -- the point of the simulator is to watch how a message was
+    classified and routed.
+
+    ``body`` is exactly what TextRoute sent, verbatim. An outbound one already
+    reads "Naruto: ..." because the sender is prefixed when the SMS is composed,
+    so there is no separate sender field to render: adding one would invite a
+    second, divergent label beside the text that already carries it.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    direction: str
+    body: str
+    kind: str | None
+    workflow_status: str
+    created_at: datetime
+
+
+class ConversationResponse(BaseModel):
+    """A page of conversation plus the cursor to continue from.
+
+    The cursor is the ``(created_at, id)`` of the last message rather than a
+    timestamp alone: a fan-out writes its copies inside one transaction and they
+    share a ``created_at`` exactly, so a timestamp-only cursor would step over
+    the siblings and never return for them.
+    """
+
+    messages: list[ConversationMessageResponse]
+    server_time: datetime
+
+
 class CreateGroupRequest(BaseModel):
     name: str
     description: str | None = None
